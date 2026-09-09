@@ -1,0 +1,149 @@
+import { Icons, Theme } from "../theme.slint";
+import { ActionCard, CaptionText, FlatButton, InlineNotice, PageHeading, SectionCard, SectionHeading } from "../components.slint";
+
+export component CaptureView inherits Rectangle {
+    background: transparent;
+
+    in property <bool> busy;
+    in property <bool> uploading;
+    in property <float> upload-progress;
+    in property <bool> recording;
+    in property <bool> configured;
+    in property <string> region-hotkey;
+    in property <string> recording-hotkey;
+    in property <string> screen-hotkey;
+    in property <string> clipboard-hotkey;
+    in property <string> status-text;
+    in property <string> status-detail;
+    in property <string> last-link;
+    in property <string> last-delete-url;
+    in property <bool> last-delete-saved;
+    in property <bool> update-available;
+    in property <string> update-version;
+    property <length> action-width: (root.width - 24px) / 5;
+    property <bool> show-activity: root.configured
+        && (root.busy || root.uploading || root.recording || root.last-link != ""
+            || root.last-delete-url != "" || root.status-text != "Ready" || root.status-detail != "");
+
+    callback capture-region();
+    callback record-region();
+    callback capture-screen();
+    callback upload-clipboard();
+    callback choose-file();
+    callback open-link();
+    callback copy-link();
+    callback copy-delete();
+    callback open-update();
+    callback show-settings();
+
+    VerticalLayout {
+        spacing: 12px;
+
+        PageHeading { text: "Capture & upload"; }
+
+        if !root.configured: InlineNotice {
+            text: "Uploader not configured";
+            detail: "Add an endpoint before uploading.";
+            action-text: "Settings";
+            action => { root.show-settings(); }
+        }
+
+        if root.update-available: InlineNotice {
+            text: "ShareR " + root.update-version + " is available";
+            action-text: "View release";
+            kind: 1;
+            action => { root.open-update(); }
+        }
+
+        SectionHeading { text: "QUICK ACTIONS"; }
+
+        HorizontalLayout {
+            spacing: 6px;
+            ActionCard {
+                width: root.action-width; title: "Region"; subtitle: root.width >= 650px ? root.region-hotkey : ""; icon-source: Icons.crop;
+                enabled: !root.busy && root.configured; clicked => { root.capture-region(); }
+            }
+            ActionCard {
+                width: root.action-width; title: root.recording ? "Stop" : "Record";
+                subtitle: root.width >= 650px ? (root.recording ? "Finish and upload" : root.recording-hotkey) : ""; icon-source: Icons.recording;
+                destructive: root.recording; enabled: (!root.busy || root.recording) && root.configured;
+                clicked => { root.record-region(); }
+            }
+            ActionCard {
+                width: root.action-width; title: "Screen"; subtitle: root.width >= 650px ? root.screen-hotkey : ""; icon-source: Icons.screen;
+                enabled: !root.busy && root.configured; clicked => { root.capture-screen(); }
+            }
+            ActionCard {
+                width: root.action-width; title: "Clipboard"; subtitle: root.width >= 650px ? root.clipboard-hotkey : ""; icon-source: Icons.clipboard;
+                enabled: !root.busy && root.configured; clicked => { root.upload-clipboard(); }
+            }
+            ActionCard {
+                width: root.action-width; title: "File"; icon-source: Icons.file;
+                enabled: !root.busy && root.configured; clicked => { root.choose-file(); }
+            }
+        }
+
+        if root.show-activity: SectionHeading { text: "ACTIVITY"; }
+
+        if root.show-activity: SectionCard {
+            height: root.last-delete-url != "" ? 122px : (root.last-link != "" || root.uploading ? 92px : 72px);
+            border-color: root.status-text == "Upload failed" ? Theme.danger : Theme.border;
+            HorizontalLayout {
+                padding: 11px;
+                spacing: 10px;
+                Rectangle {
+                    width: 3px;
+                    border-radius: 1px;
+                    background: root.status-text == "Upload failed" ? Theme.danger : (root.busy ? Theme.accent : Theme.success);
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 4px;
+                    Text { text: root.status-text; color: Theme.text; font-size: 12px; font-weight: 700; }
+                    CaptionText { text: root.status-detail; color: Theme.text-soft; }
+                    if root.uploading: HorizontalLayout {
+                        spacing: 10px;
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            height: 4px;
+                            border-radius: 2px;
+                            background: Theme.surface-raised;
+                            Rectangle {
+                                width: parent.width * root.upload-progress;
+                                height: parent.height;
+                                border-radius: 2px;
+                                background: Theme.primary;
+                                animate width { duration: 90ms; }
+                            }
+                        }
+                        Text {
+                            width: 32px;
+                            text: round(root.upload-progress * 100) + "%";
+                            color: Theme.text-soft;
+                            font-size: 8px;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if root.last-link != "": HorizontalLayout {
+                        spacing: 6px;
+                        CaptionText { text: root.last-link; color: Theme.primary-bright; vertical-alignment: center; }
+                        FlatButton { width: 62px; text: "Copy"; icon-source: Icons.copy; has-icon: true; clicked => { root.copy-link(); } }
+                        FlatButton { width: 62px; text: "Open"; icon-source: Icons.open; has-icon: true; clicked => { root.open-link(); } }
+                    }
+                    if root.last-delete-url != "": HorizontalLayout {
+                        spacing: 6px;
+                        CaptionText {
+                            text: root.last-delete-saved ? "Deletion capability saved in History" : "Deletion URL was not saved; copy it now";
+                            color: root.last-delete-saved ? Theme.text-muted : Theme.danger;
+                            vertical-alignment: center;
+                        }
+                        FlatButton { width: 78px; text: "Copy delete"; clicked => { root.copy-delete(); } }
+                    }
+                }
+            }
+        }
+
+        Rectangle { vertical-stretch: 1; background: transparent; }
+    }
+}

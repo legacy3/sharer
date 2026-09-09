@@ -1,0 +1,114 @@
+import { Theme } from "theme.slint";
+
+export component RegionWindow inherits Window {
+    title: "Select a region";
+    background: #000;
+    in property <image> capture-image;
+    in property <string> selection-instruction: "Drag to select  -  click a window  -  Esc to cancel";
+    in-out property <bool> snap-active: false;
+    in-out property <float> snap-x: 0;
+    in-out property <float> snap-y: 0;
+    in-out property <float> snap-width: 0;
+    in-out property <float> snap-height: 0;
+    callback selected(float, float, float, float);
+    callback cancelled();
+    callback window-hovered(float, float);
+
+    property <length> start-x: 0px;
+    property <length> start-y: 0px;
+    property <length> end-x: 0px;
+    property <length> end-y: 0px;
+    property <bool> selecting: false;
+    property <length> selection-x: min(start-x, end-x);
+    property <length> selection-y: min(start-y, end-y);
+    property <length> selection-w: abs(end-x - start-x);
+    property <length> selection-h: abs(end-y - start-y);
+
+    init => { keyboard-focus.focus(); }
+
+    Image { source: root.capture-image; width: 100%; height: 100%; image-fit: fill; }
+    Rectangle { width: 100%; height: 100%; background: #00000038; }
+
+    if root.snap-active && !root.selecting: Rectangle {
+        x: root.snap-x * root.width;
+        y: root.snap-y * root.height;
+        width: root.snap-width * root.width;
+        height: root.snap-height * root.height;
+        background: #45a65d18;
+        border-width: 2px;
+        border-color: Theme.primary-bright;
+    }
+
+    if root.selecting: Rectangle {
+        x: root.selection-x;
+        y: root.selection-y;
+        width: root.selection-w;
+        height: root.selection-h;
+        background: transparent;
+        border-width: 2px;
+        border-color: Theme.primary-bright;
+    }
+
+    Rectangle {
+        x: 18px;
+        y: 18px;
+        width: 330px;
+        height: 42px;
+        border-radius: 8px;
+        background: #0b0f0ddd;
+        Text {
+            text: root.selection-instruction;
+            color: Theme.text;
+            font-size: 13px;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+
+    area := TouchArea {
+        width: 100%;
+        height: 100%;
+        mouse-cursor: crosshair;
+        pointer-event(event) => {
+            if event.kind == PointerEventKind.move {
+                if root.selecting {
+                    root.end-x = self.mouse-x;
+                    root.end-y = self.mouse-y;
+                } else {
+                    root.window-hovered(self.mouse-x / root.width, self.mouse-y / root.height);
+                }
+                return;
+            }
+            if event.button != PointerEventButton.left { return; }
+            if event.kind == PointerEventKind.down {
+                root.start-x = self.mouse-x;
+                root.start-y = self.mouse-y;
+                root.end-x = self.mouse-x;
+                root.end-y = self.mouse-y;
+                root.selecting = true;
+            } else if event.kind == PointerEventKind.up && root.selecting {
+                root.end-x = self.mouse-x;
+                root.end-y = self.mouse-y;
+                if root.selection-w >= 2px && root.selection-h >= 2px {
+                    root.selected(root.selection-x / root.width, root.selection-y / root.height,
+                        root.selection-w / root.width, root.selection-h / root.height);
+                } else if root.snap-active {
+                    root.selected(root.snap-x, root.snap-y, root.snap-width, root.snap-height);
+                }
+                root.selecting = false;
+            }
+        }
+    }
+
+    keyboard-focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.cancelled();
+                return accept;
+            }
+            return reject;
+        }
+    }
+}

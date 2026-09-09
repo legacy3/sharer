@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "https://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>ShareR</string>
+    <key>CFBundleExecutable</key>
+    <string>ShareR</string>
+    <key>CFBundleIconFile</key>
+    <string>ShareR</string>
+    <key>CFBundleIdentifier</key>
+    <string>re.sharer</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>ShareR</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>0.1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>ShareR captures the screen, windows, and selected regions that you choose to share.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

@@ -1,0 +1,224 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    name: Validate before release builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust components
+        run: rustup component add clippy rustfmt
+
+      - name: Restore Rust validation cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ci-native-v2-ubuntu-24.04-x86_64-unknown-linux-gnu-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+
+      - name: Restore Rulewright
+        id: rulewright-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cargo/bin/rulewright
+          key: rulewright-${{ runner.os }}-ubuntu-24.04-0.1.2
+
+      - name: Install Rulewright
+        if: steps.rulewright-cache.outputs.cache-hit != 'true'
+        run: cargo install rulewright --version 0.1.2 --locked
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Check Rulewright guidance
+        run: rulewright --llm > rulewright-report.md
+
+      - name: Enforce Rulewright defaults
+        run: rulewright --strict
+
+      - name: Install Linux desktop dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libayatana-appindicator3-dev libgbm-dev libgtk-3-dev libpipewire-0.3-dev libwayland-dev libxdo-dev libxkbcommon-dev
+
+      - name: Lint headless targets
+        run: cargo clippy --locked --profile ci --all-targets --target x86_64-unknown-linux-gnu
+
+      - name: Test headless targets
+        run: cargo test --locked --profile ci --lib --bins --tests --target x86_64-unknown-linux-gnu
+
+      - name: Lint desktop targets
+        run: cargo clippy --locked --profile ci --features desktop --all-targets --target x86_64-unknown-linux-gnu
+
+      - name: Test desktop targets
+        run: cargo test --locked --profile ci --features desktop --lib --bins --tests --target x86_64-unknown-linux-gnu
+
+  build:
+    name: Build ${{ matrix.asset }}
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset: sharer-linux-x86_64
+            cargo_features: --features desktop
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            asset: sharer-linux-headless-x86_64
+            cargo_features: ""
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset: sharer-windows-x86_64
+            cargo_features: --features desktop
+          - os: macos-15
+            target: aarch64-apple-darwin
+            asset: sharer-macos-aarch64
+            cargo_features: --features desktop
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset: sharer-macos-x86_64
+            cargo_features: --features desktop
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux' && matrix.cargo_features != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends libasound2-dev libayatana-appindicator3-dev libgbm-dev libgtk-3-dev libpipewire-0.3-dev libwayland-dev libxdo-dev libxkbcommon-dev
+
+      - name: Install Rust target
+        run: rustup target add "${{ matrix.target }}"
+
+      - name: Restore release build cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ci-native-v2-${{ matrix.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml') }}
+
+      - name: Configure UltraHDR for Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-Content -Path $env:GITHUB_ENV -Value 'ULTRAHDR_SKIP_PATCHES=1'
+
+      - name: Configure macOS deployment target
+        if: runner.os == 'macOS'
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=14.0' >> "$GITHUB_ENV"
+
+      - name: Build requested binary
+        run: cargo build --locked --release ${{ matrix.cargo_features }} --target "${{ matrix.target }}"
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p "package/${{ matrix.asset }}"
+          cp "target/${{ matrix.target }}/release/ShareR" "package/${{ matrix.asset }}/ShareR"
+          cp CONTRIBUTING.md LICENSE README.md assets/sharer.png assets/icons/FONT-AWESOME-LICENSE.txt "package/${{ matrix.asset }}/"
+          mkdir -p "package/${{ matrix.asset }}/docs/screenshots"
+          cp docs/custom-uploaders.md "package/${{ matrix.asset }}/docs/"
+          cp docs/screenshots/*.png "package/${{ matrix.asset }}/docs/screenshots/"
+          chmod +x "package/${{ matrix.asset }}/ShareR"
+          tar -C package -czf "${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}"
+
+      - name: Package macOS application
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          root="package/${{ matrix.asset }}"
+          app="$root/ShareR.app"
+          iconset="$RUNNER_TEMP/ShareR.iconset"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
+          cp "target/${{ matrix.target }}/release/ShareR" "$app/Contents/MacOS/ShareR"
+          cp assets/macos/Info.plist "$app/Contents/Info.plist"
+          version="${GITHUB_REF_NAME#v}"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$app/Contents/Info.plist"
+          for size in 16 32 128 256 512; do
+            sips -z "$size" "$size" assets/sharer.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+            doubled=$((size * 2))
+            sips -z "$doubled" "$doubled" assets/sharer.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$iconset" -o "$app/Contents/Resources/ShareR.icns"
+          plutil -lint "$app/Contents/Info.plist"
+          test -s "$app/Contents/Resources/ShareR.icns"
+          chmod +x "$app/Contents/MacOS/ShareR"
+          cp CONTRIBUTING.md LICENSE README.md assets/icons/FONT-AWESOME-LICENSE.txt "$root/"
+          mkdir -p "$root/docs/screenshots"
+          cp docs/custom-uploaders.md "$root/docs/"
+          cp docs/screenshots/*.png "$root/docs/screenshots/"
+          tar -C package -czf "${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}"
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path "package/${{ matrix.asset }}" -Force
+          Copy-Item "target/${{ matrix.target }}/release/ShareR.exe" "package/${{ matrix.asset }}/ShareR.exe"
+          Copy-Item CONTRIBUTING.md, LICENSE, README.md, assets/sharer.png, assets/icons/FONT-AWESOME-LICENSE.txt "package/${{ matrix.asset }}/"
+          New-Item -ItemType Directory -Path "package/${{ matrix.asset }}/docs/screenshots" -Force
+          Copy-Item docs/custom-uploaders.md "package/${{ matrix.asset }}/docs/"
+          Copy-Item docs/screenshots/*.png "package/${{ matrix.asset }}/docs/screenshots/"
+          Compress-Archive -Path "package/${{ matrix.asset }}" -DestinationPath "${{ matrix.asset }}.zip"
+
+      - name: Attest release archive
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: "${{ matrix.asset }}.*"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ matrix.asset }}
+          path: sharer-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release-assets/* --repo "${GITHUB_REPOSITORY}" --generate-notes --verify-tag

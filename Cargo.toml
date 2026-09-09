@@ -1,0 +1,129 @@
+[package]
+name = "sharer"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A lightweight cross-platform capture, clipboard, and file uploader"
+license = "MIT"
+repository = "https://github.com/legacy3/sharer"
+publish = false
+
+[[bin]]
+name = "ShareR"
+path = "src/main.rs"
+
+[features]
+default = []
+desktop = [
+    "dep:auto-launch",
+    "dep:apple-metal",
+    "dep:core-graphics",
+    "dep:getrandom",
+    "dep:global-hotkey",
+    "dep:gtk",
+    "dep:libloading",
+    "dep:num-traits",
+    "dep:open",
+    "dep:rfd",
+    "dep:rodio",
+    "dep:semver",
+    "dep:screencapturekit",
+    "dep:slint",
+    "dep:slint-build",
+    "dep:tray-icon",
+    "dep:webp-animation",
+    "dep:xcap",
+    "dep:half",
+    "dep:hex",
+    "dep:ultrahdr",
+    "dep:windows-capture",
+    "dep:windows",
+]
+
+[dependencies]
+anyhow = "1"
+arboard = "3.6.1"
+auto-launch = { version = "0.6.0", optional = true }
+cap-std = "4.0.3"
+clap = { version = "4.6", features = ["derive"] }
+directories = "6"
+global-hotkey = { version = "0.8.0", optional = true }
+getrandom = { version = "0.3.3", optional = true }
+hex = { version = "0.4.3", optional = true }
+image = { version = "0.25.10", default-features = false, features = ["ico", "png"] }
+mime_guess = "2"
+futures-util = "0.3"
+num-traits = { version = "0.2", optional = true }
+open = { version = "5", optional = true }
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"], optional = true }
+rodio = { version = "0.22.2", default-features = false, features = ["playback"], optional = true }
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled", "fallible_uint"] }
+semver = { version = "1", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+socket2 = "0.6.1"
+tokio = { version = "1", features = ["rt", "time"] }
+slint = { version = "1.15.1", default-features = false, features = ["accessibility", "backend-winit", "compat-1-2", "renderer-software", "std"], optional = true }
+thiserror = "2"
+tray-icon = { version = "0.22.0", default-features = false, optional = true }
+url = "2"
+webp-animation = { version = "0.10.0", default-features = false, features = ["static"], optional = true }
+
+[target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
+xcap = { version = "0.9.8", default-features = false, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+half = { version = "2", optional = true }
+consolex = { version = "0.1.0", default-features = false }
+reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "multipart", "native-tls", "socks", "stream", "system-proxy"] }
+ultrahdr = { version = "0.1.5", default-features = true, optional = true }
+windows-capture = { version = "2.0.1", optional = true }
+windows = { version = "0.62.2", features = ["Win32_Devices_Display", "Win32_Graphics_Gdi"], optional = true }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18.2", optional = true }
+libloading = { version = "0.8.9", optional = true }
+reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "multipart", "rustls-no-provider", "socks", "stream", "system-proxy"] }
+rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Newer releases currently require the macOS 26 SDK even when their APIs are unused.
+apple-metal = { version = "=0.6.0", default-features = false, optional = true }
+core-graphics = { version = "0.23.2", default-features = false, features = ["link"], optional = true }
+reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "multipart", "native-tls", "socks", "stream", "system-proxy"] }
+screencapturekit = { version = "8.0.1", default-features = false, features = ["macos_14_0"], optional = true }
+
+[build-dependencies]
+slint-build = { version = "1.15.1", optional = true }
+
+[dev-dependencies]
+allocation-counter = "0.8.1"
+divan = { version = "0.1.21", default-features = false }
+metastrip = "0.1.0"
+tempfile = "3.27"
+
+[[bench]]
+name = "memory"
+harness = false
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.ci]
+inherits = "dev"
+debug = 0
+incremental = false
+strip = "debuginfo"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+module_name_repetitions = "allow"

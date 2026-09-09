@@ -1,0 +1,812 @@
+# rulewright.toml - lint rule configuration.
+#
+# Every registered rule MUST appear here. Omitting a rule is an error.
+# Set `enabled = false` to disable a rule without removing its config.
+# Set `allow_suppressions = false` to reject every source-level #rw(...) directive.
+# Run `rulewright --init` to generate a fresh config with all rules.
+#
+# [glob_sets] defines named pattern collections.
+# Rules can use literal patterns or reference a named set. Prefixing a set with `@` is explicit.
+
+allow_suppressions = false
+
+[rules.rust_abs_home_path]
+enabled = true
+ignore = []
+
+[rules.rust_aligned]
+enabled = true
+ignore = []
+
+[rules.rust_alloc_in_loop]
+enabled = false
+ignore = []
+
+[rules.rust_allow_reason]
+enabled = true
+ignore = []
+
+[rules.rust_ambient_syscall]
+enabled = true
+ignore = []
+
+[rules.rust_ambiguous_unicode]
+enabled = true
+ignore = []
+
+[rules.rust_asref_bound_on_type]
+enabled = true
+ignore = []
+
+[rules.rust_assert_side_effects]
+enabled = true
+ignore = []
+
+[rules.rust_assoc_fn_no_self]
+enabled = true
+ignore = []
+
+[rules.rust_async_loop_no_yield]
+enabled = true
+ignore = []
+
+[rules.rust_attr_order]
+enabled = true
+ignore = []
+
+[rules.rust_banner_comments]
+enabled = true
+ignore = []
+
+[rules.rust_bidirectional_unicode]
+enabled = true
+ignore = []
+
+[rules.rust_bool_params]
+enabled = true
+ignore = []
+threshold = 2
+
+[rules.rust_box_leak]
+enabled = true
+ignore = []
+
+[rules.rust_box_vec]
+enabled = true
+ignore = []
+
+[rules.rust_build_rs_external_tool]
+enabled = true
+ignore = []
+
+[rules.rust_builder_conventions]
+enabled = true
+ignore = []
+
+[rules.rust_builder_fallible_setter]
+enabled = true
+ignore = []
+
+[rules.rust_builder_param]
+enabled = true
+ignore = []
+
+[rules.rust_busy_wait]
+enabled = true
+ignore = []
+
+[rules.rust_catch_unwind]
+enabled = true
+ignore = []
+
+[rules.rust_cfg_not_test]
+enabled = true
+ignore = []
+
+[rules.rust_closure_dense_method_chain]
+enabled = true
+ignore = []
+chain_threshold = 12
+closure_threshold = 6
+
+[rules.rust_closure_param_position]
+enabled = true
+ignore = []
+
+[rules.rust_collection_new_in_loop]
+enabled = true
+ignore = []
+
+[rules.rust_collection_trait_completeness]
+enabled = true
+ignore = []
+
+[rules.rust_comment_space]
+enabled = true
+ignore = []
+
+[rules.rust_commented_code]
+enabled = true
+ignore = []
+
+[rules.rust_concrete_io_param]
+enabled = true
+ignore = []
+types = [
+    "File",
+    "Stdin",
+    "Stdout",
+    "TcpStream",
+    "UnixStream",
+]
+
+[rules.rust_conversion_self_convention]
+enabled = true
+ignore = []
+
+[rules.rust_ctor_new]
+enabled = true
+ignore = []
+
+[rules.rust_ctor_param_count]
+enabled = true
+ignore = []
+threshold = 5
+
+[rules.rust_cyclomatic_complexity]
+enabled = true
+ignore = []
+threshold = 15
+
+[rules.rust_dbg]
+enabled = true
+ignore = []
+
+[rules.rust_deep_exit]
+enabled = true
+ignore = []
+
+[rules.rust_deeply_nested_types]
+enabled = true
+ignore = []
+
+[rules.rust_default_hasher]
+enabled = true
+ignore = []
+
+[rules.rust_deny_warnings]
+enabled = true
+ignore = []
+
+[rules.rust_derive_order]
+enabled = true
+ignore = []
+
+[rules.rust_dll_boundary_types]
+enabled = true
+ignore = []
+
+[rules.rust_doc_comment_period]
+enabled = true
+ignore = []
+
+[rules.rust_doc_errors_section]
+enabled = true
+ignore = []
+
+[rules.rust_doc_inline_reexport]
+enabled = true
+ignore = []
+
+[rules.rust_doc_panics_section]
+enabled = true
+ignore = []
+
+[rules.rust_doc_param_table]
+enabled = true
+ignore = []
+
+[rules.rust_drop_panic]
+enabled = true
+ignore = []
+
+[rules.rust_dup_expressions]
+enabled = true
+ignore = []
+
+[rules.rust_duplicate_strings]
+enabled = true
+ignore = []
+min_chars = 40
+min_occurrences = 3
+
+[rules.rust_duplicate_words]
+enabled = true
+ignore = []
+
+[rules.rust_dyn_wrapper_in_api]
+enabled = true
+ignore = []
+
+[rules.rust_error_missing_traits]
+enabled = true
+ignore = []
+
+[rules.rust_error_type_unit]
+enabled = true
+ignore = []
+
+[rules.rust_excessive_float_precision]
+enabled = true
+ignore = []
+
+[rules.rust_exotic_numeric_api]
+enabled = true
+ignore = []
+
+[rules.rust_expect_message]
+enabled = true
+ignore = []
+
+[rules.rust_expect_over_allow]
+enabled = true
+ignore = []
+allowed_lints = []
+
+[rules.rust_fallible_in_iterator]
+enabled = true
+ignore = []
+
+[rules.rust_ffi_crate_naming]
+enabled = true
+ignore = []
+
+[rules.rust_ffi_in_core]
+enabled = true
+ignore = []
+
+[rules.rust_ffi_thin_glue]
+enabled = true
+ignore = []
+threshold = 25
+
+[rules.rust_first_doc_sentence]
+enabled = true
+ignore = []
+max_words = 15
+
+[rules.rust_floating_point_eq]
+enabled = true
+ignore = []
+
+[rules.rust_foreign_reexports]
+enabled = true
+ignore = []
+allowed = []
+
+[rules.rust_from_instead_of_as]
+enabled = true
+ignore = []
+
+[rules.rust_future_send_assert]
+enabled = true
+ignore = []
+
+[rules.rust_getter_prefix]
+enabled = true
+ignore = []
+
+[rules.rust_glob_reexport]
+enabled = true
+ignore = []
+
+[rules.rust_global_state]
+enabled = true
+ignore = []
+
+[rules.rust_hardcoded_url]
+enabled = true
+ignore = [
+    "src/upload/providers/imgur.rs",
+    "src/upload/providers/sul.rs",
+    "src/upload/providers/transfer_sh.rs",
+    "src/upload/providers/uguu.rs",
+    "src/upload/providers/vgy.rs",
+]
+
+[rules.rust_impl_into_for_owned]
+enabled = true
+ignore = []
+
+[rules.rust_impl_member_order]
+enabled = true
+ignore = []
+
+[rules.rust_infallible_from_weak]
+enabled = true
+ignore = []
+
+[rules.rust_inherent_before_trait_impl]
+enabled = true
+ignore = []
+
+[rules.rust_inline_test_module_size]
+enabled = true
+ignore = []
+threshold = 200
+
+[rules.rust_large_async_local]
+enabled = true
+ignore = []
+threshold = 1024
+
+[rules.rust_large_enum_variant]
+enabled = true
+ignore = []
+threshold = 256
+
+[rules.rust_large_fn_params]
+enabled = true
+ignore = []
+threshold = 6
+
+[rules.rust_large_stack_array]
+enabled = true
+ignore = []
+threshold = 4096
+
+[rules.rust_log_in_loop]
+enabled = true
+ignore = []
+
+[rules.rust_log_named_events]
+enabled = true
+ignore = []
+
+[rules.rust_long_compound_name]
+enabled = true
+ignore = []
+threshold = 4
+
+[rules.rust_loop_to_while]
+enabled = true
+ignore = []
+
+[rules.rust_lossy_cast]
+enabled = true
+ignore = []
+
+[rules.rust_macro_hidden_items]
+enabled = true
+ignore = []
+
+[rules.rust_magic_numbers]
+enabled = false
+ignore = []
+allowed = [
+    "0",
+    "1",
+    "0.0",
+    "1.0",
+]
+min_occurrences = 3
+
+[rules.rust_manual_async_fn]
+enabled = true
+ignore = []
+
+[rules.rust_manual_error_impl]
+enabled = true
+ignore = []
+
+[rules.rust_map_err_pure_wrap]
+enabled = true
+ignore = []
+
+[rules.rust_match_layout]
+enabled = true
+ignore = []
+
+[rules.rust_max_fn_lines]
+enabled = true
+ignore = []
+threshold = 150
+
+[rules.rust_max_nesting]
+enabled = true
+ignore = []
+threshold = 5
+
+[rules.rust_mem_forget]
+enabled = true
+ignore = []
+
+[rules.rust_missing_assert_message]
+enabled = true
+ignore = []
+
+[rules.rust_missing_capacity]
+enabled = true
+ignore = []
+
+[rules.rust_missing_debug]
+enabled = true
+ignore = []
+
+[rules.rust_missing_error_context]
+enabled = true
+ignore = []
+
+[rules.rust_mod_order]
+enabled = true
+ignore = []
+
+[rules.rust_module_docs]
+enabled = true
+ignore = []
+
+[rules.rust_multiple_inherent_impl]
+enabled = true
+ignore = []
+
+[rules.rust_mutex_in_async]
+enabled = false
+ignore = []
+
+[rules.rust_native_escape_hatches]
+enabled = true
+ignore = []
+
+[rules.rust_nested_smart_pointers]
+enabled = true
+ignore = []
+
+[rules.rust_newtype_pub_field]
+enabled = true
+ignore = []
+
+[rules.rust_no_prelude]
+enabled = true
+ignore = []
+
+[rules.rust_non_exhaustive_on_public]
+enabled = true
+ignore = []
+
+[rules.rust_nonsend_across_await]
+enabled = true
+ignore = []
+
+[rules.rust_ok_or_eager]
+enabled = true
+ignore = []
+
+[rules.rust_owned_ref_param]
+enabled = true
+ignore = []
+
+[rules.rust_padding]
+enabled = true
+ignore = []
+boundaries = [
+    "functions",
+    "control-flow",
+    "let-runs",
+    "returns",
+    "tail-expressions",
+]
+
+[rules.rust_panic]
+enabled = true
+ignore = []
+
+[rules.rust_panic_in_result_fn]
+enabled = true
+ignore = []
+
+[rules.rust_panic_message]
+enabled = true
+ignore = []
+
+[rules.rust_param_clump]
+enabled = true
+ignore = []
+min_clump = 3
+min_fns = 3
+
+[rules.rust_param_order_consistency]
+enabled = false
+ignore = []
+
+[rules.rust_println]
+enabled = true
+ignore = []
+
+[rules.rust_proc_macro_thin_shim]
+enabled = true
+ignore = []
+
+[rules.rust_pub_api_docs]
+enabled = true
+ignore = []
+
+[rules.rust_pub_api_foreign_types]
+enabled = true
+ignore = []
+allowed = []
+assume_external = []
+
+[rules.rust_pub_api_generic_nesting]
+enabled = true
+ignore = []
+
+[rules.rust_pub_api_smart_pointers]
+enabled = true
+ignore = []
+
+[rules.rust_pub_use_grouping]
+enabled = true
+ignore = []
+
+[rules.rust_pub_use_position]
+enabled = true
+ignore = []
+
+[rules.rust_public_error_enum]
+enabled = true
+ignore = []
+
+[rules.rust_range_over_rangebounds]
+enabled = true
+ignore = []
+
+[rules.rust_recursive_fn]
+enabled = true
+ignore = []
+
+[rules.rust_redundant_field_names]
+enabled = true
+ignore = []
+
+[rules.rust_rulewright_directives]
+enabled = true
+ignore = []
+
+[rules.rust_sensitive_debug]
+enabled = true
+ignore = []
+allowed_fields = []
+markers = [
+    "api_key",
+    "authorization",
+    "bearer",
+    "credential",
+    "credentials",
+    "password",
+    "passwd",
+    "private_key",
+    "secret",
+    "signing_key",
+    "token",
+]
+redacted_types = [
+    "Secret",
+    "SecretBox",
+    "SecretString",
+    "SecretVec",
+    "Sensitive",
+]
+
+[rules.rust_similar_fns]
+enabled = true
+ignore = []
+jaccard_percent = 85
+min_tokens = 40
+
+[rules.rust_single_item_path]
+enabled = true
+ignore = []
+
+[rules.rust_sorted]
+enabled = true
+ignore = []
+
+[rules.rust_static_mut]
+enabled = true
+ignore = []
+
+[rules.rust_string_error]
+enabled = true
+ignore = []
+
+[rules.rust_style]
+enabled = true
+ignore = []
+
+[rules.rust_subtractive_feature_cfg]
+enabled = true
+ignore = []
+
+[rules.rust_tautological_assert]
+enabled = true
+ignore = []
+
+[rules.rust_thiserror_qualified]
+enabled = true
+ignore = []
+
+[rules.rust_todo]
+enabled = true
+ignore = []
+
+[rules.rust_too_many_lines_in_file]
+enabled = true
+ignore = []
+slack_percent = 20
+threshold = 1500
+
+[rules.rust_trait_logic_not_inherent]
+enabled = true
+ignore = []
+threshold = 3
+
+[rules.rust_transmute_in_safe_fn]
+enabled = true
+ignore = []
+
+[rules.rust_transmute_usage]
+enabled = true
+ignore = []
+
+[rules.rust_type_def_ordering]
+enabled = true
+ignore = []
+
+[rules.rust_unbalanced_crate_root]
+enabled = true
+ignore = []
+max_root_items = 40
+min_modules_for_empty_root = 8
+
+[rules.rust_unchecked_indexing]
+enabled = false
+ignore = []
+
+[rules.rust_unnecessary_collect]
+enabled = true
+ignore = []
+
+[rules.rust_unsafe_comment]
+enabled = true
+ignore = []
+
+[rules.rust_unsafe_fn_safety_doc]
+enabled = true
+ignore = []
+
+[rules.rust_unsafe_impl_send]
+enabled = true
+ignore = []
+
+[rules.rust_unsafe_without_ub_surface]
+enabled = true
+ignore = []
+
+[rules.rust_unwrap_in_lib]
+enabled = true
+ignore = []
+
+[rules.rust_vec_init_then_push]
+enabled = true
+ignore = []
+
+[rules.rust_vec_string_field]
+enabled = true
+ignore = []
+
+[rules.rust_weasel_words]
+enabled = true
+ignore = []
+words = [
+    "Factory",
+    "Manager",
+    "Service",
+]
+
+[rules.rust_where_clauses]
+enabled = true
+ignore = []
+
+[rules.rust_wildcard_imports]
+enabled = true
+ignore = []
+
+[rules.rust_yoda_conditions]
+enabled = true
+ignore = []
+
+[rules.toml_ambiguous_unicode]
+enabled = true
+ignore = []
+
+[rules.toml_bidirectional_unicode]
+enabled = true
+ignore = []
+
+[rules.toml_cargo_edition]
+enabled = true
+ignore = []
+min_edition = 2024
+
+[rules.toml_cargo_feature_names]
+enabled = true
+ignore = []
+allowed = []
+
+[rules.toml_cargo_feature_no_std]
+enabled = true
+ignore = []
+
+[rules.toml_cargo_msrv]
+enabled = true
+ignore = []
+
+[rules.toml_cargo_unused_deps]
+enabled = true
+ignore = []
+always_used = ["apple-metal"]
+
+[rules.toml_cargo_workspace_dep_features]
+enabled = true
+ignore = []
+allowed_features = [
+    "derive",
+    "std",
+]
+
+[rules.toml_cargo_workspace_lints]
+enabled = true
+ignore = []
+required_clippy = [
+    "cargo",
+    "complexity",
+    "correctness",
+    "pedantic",
+    "perf",
+    "style",
+    "suspicious",
+    "allow_attributes_without_reason",
+    "as_pointer_underscore",
+    "assertions_on_result_states",
+    "clone_on_ref_ptr",
+    "deref_by_slicing",
+    "disallowed_script_idents",
+    "empty_drop",
+    "empty_enum_variants_with_brackets",
+    "empty_structs_with_brackets",
+    "fn_to_numeric_cast_any",
+    "if_then_some_else_none",
+    "implicit_clone",
+    "map_err_ignore",
+    "redundant_type_annotations",
+    "renamed_function_params",
+    "semicolon_outside_block",
+    "undocumented_unsafe_blocks",
+    "unnecessary_safety_comment",
+    "unnecessary_safety_doc",
+    "unneeded_field_pattern",
+    "unused_result_ok",
+]
+required_rust = [
+    "ambiguous_negative_literals",
+    "missing_debug_implementations",
+    "redundant_imports",
+    "redundant_lifetimes",
+    "trivial_numeric_casts",
+    "unsafe_op_in_unsafe_fn",
+    "unused_lifetimes",
+]
+
+[rules.toml_validity]
+enabled = true
+ignore = []

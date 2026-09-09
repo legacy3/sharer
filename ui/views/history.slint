@@ -1,0 +1,137 @@
+import { ScrollView } from "std-widgets.slint";
+import { Icons, Theme } from "../theme.slint";
+import { FlatButton, IconButton, PageHeading, SectionCard } from "../components.slint";
+import { HistoryRow } from "../models.slint";
+
+component TableHeading inherits Text {
+    color: Theme.text-muted;
+    font-size: 9px;
+    font-weight: 700;
+    vertical-alignment: center;
+}
+
+component TableCell inherits Text {
+    color: Theme.text-soft;
+    font-size: 10px;
+    vertical-alignment: center;
+    overflow: elide;
+}
+
+component HistoryActions inherits HorizontalLayout {
+    callback open-link();
+    callback copy-link();
+    callback copy-delete-link();
+
+    width: 92px;
+    height: Theme.control-height;
+    vertical-stretch: 0;
+    alignment: end;
+    spacing: 4px;
+    IconButton { icon-source: Icons.open; description: "Open public link"; clicked => { root.open-link(); } }
+    IconButton { icon-source: Icons.copy; description: "Copy public link"; clicked => { root.copy-link(); } }
+    IconButton { icon-source: Icons.trash; description: "Copy deletion URL"; destructive: true; clicked => { root.copy-delete-link(); } }
+}
+
+export component HistoryView inherits Rectangle {
+    background: transparent;
+    min-height: 0px;
+    in property <[HistoryRow]> rows;
+    in property <string> page-label;
+    in property <bool> has-previous;
+    in property <bool> has-next;
+    callback open-link(int);
+    callback copy-link(int);
+    callback copy-delete-link(int);
+    callback previous-page();
+    callback next-page();
+
+    VerticalLayout {
+        spacing: 12px;
+        PageHeading { text: "Upload history"; }
+
+        SectionCard {
+            vertical-stretch: 1;
+            min-height: 0px;
+            VerticalLayout {
+                spacing: 0px;
+                Rectangle {
+                    height: 32px;
+                    background: Theme.surface-raised;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 10px;
+                        spacing: 10px;
+                        TableHeading { width: 34%; text: "FILE"; }
+                        TableHeading { width: 12%; text: "SIZE"; }
+                        TableHeading { horizontal-stretch: 1; text: "EXPIRES"; }
+                        TableHeading { width: 92px; text: "ACTIONS"; horizontal-alignment: right; }
+                    }
+                }
+
+                if root.rows.length == 0: Rectangle {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 8px;
+                        Text { text: "No uploads yet"; color: Theme.text; font-size: 14px; horizontal-alignment: center; }
+                        Text { text: "Successful uploads will appear here."; color: Theme.text-muted; font-size: 11px; horizontal-alignment: center; }
+                    }
+                }
+
+                if root.rows.length > 0: ScrollView {
+                    vertical-stretch: 1;
+                    min-height: 0px;
+                    VerticalLayout {
+                        spacing: 0px;
+                        for row[index] in root.rows: Rectangle {
+                            height: 48px;
+                            border-width: 0px;
+                            background: Math.mod(index, 2) == 1 ? #ffffff05 : transparent;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 10px;
+                                spacing: 10px;
+                                VerticalLayout {
+                                    width: 34%;
+                                    alignment: center;
+                                    spacing: 2px;
+                                    Text { text: row.filename; color: Theme.text; font-size: 10px; font-weight: 650; overflow: elide; }
+                                    Text { text: row.link; color: Theme.primary-bright; font-size: 8px; overflow: elide; }
+                                }
+                                TableCell { width: 12%; text: row.size; }
+                                TableCell { horizontal-stretch: 1; text: row.expires; }
+                                HistoryActions {
+                                    open-link => { root.open-link(index); }
+                                    copy-link => { root.copy-link(index); }
+                                    copy-delete-link => { root.copy-delete-link(index); }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 4px;
+                    background: Theme.surface;
+                }
+
+                Rectangle {
+                    height: 42px;
+                    background: Theme.surface-raised;
+                    HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 12px;
+                        padding-top: 6px;
+                        padding-bottom: 6px;
+                        spacing: 10px;
+                        FlatButton { width: 72px; text: "Previous"; enabled: root.has-previous; clicked => { root.previous-page(); } }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        Text { height: 30px; text: root.page-label; color: Theme.text-soft; font-size: 10px; vertical-alignment: center; horizontal-alignment: center; }
+                        Rectangle { horizontal-stretch: 1; background: transparent; }
+                        FlatButton { width: 72px; text: "Next"; enabled: root.has-next; clicked => { root.next-page(); } }
+                    }
+                }
+            }
+        }
+    }
+}
