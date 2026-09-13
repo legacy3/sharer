@@ -16,6 +16,7 @@ use std::{
 use anyhow::{Context, Result};
 use num_traits::ToPrimitive as _;
 use slint::ComponentHandle as _;
+use slint::winit_030::WinitWindowAccessor as _;
 
 use crate::{
     AppWindow,
@@ -312,7 +313,47 @@ fn show_ui(ui: &UiSlot, window: &AppWindow) -> Result<()> {
         return Err(error).context("failed to show application window");
     }
 
+    foreground_ui(window);
+
     Ok(())
+}
+
+fn foreground_ui(window: &AppWindow) {
+    if window
+        .window()
+        .with_winit_window(foreground_native_window)
+        .is_some()
+    {
+        return;
+    }
+
+    let window = window.as_weak();
+    let _ = slint::spawn_local(async move {
+        let Some(window) = window.upgrade() else {
+            return;
+        };
+        let Ok(native_window) = window.window().winit_window().await else {
+            return;
+        };
+
+        foreground_native_window(&native_window);
+    });
+}
+
+fn foreground_native_window(native_window: &slint::winit_030::winit::window::Window) {
+    native_window.set_minimized(false);
+    native_window.focus_window();
+
+    #[cfg(target_os = "linux")]
+    {
+        use slint::winit_030::winit::{
+            platform::wayland::WindowExtWayland as _, window::UserAttentionType,
+        };
+
+        if native_window.xdg_toplevel().is_some() {
+            native_window.request_user_attention(Some(UserAttentionType::Informational));
+        }
+    }
 }
 
 fn ensure_ui(ui: &UiSlot, resources: &CallbackResources, transient: bool) -> Result<AppWindow> {

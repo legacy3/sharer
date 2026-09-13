@@ -22,6 +22,8 @@
     <string>0.1.0</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
     <key>NSScreenCaptureUsageDescription</key>
     <string>ShareR captures the screen, windows, and selected regions that you choose to share.</string>
     <key>NSHighResolutionCapable</key>
