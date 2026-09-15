@@ -479,6 +479,10 @@ export component InlineNotice inherits Rectangle {
             if root.detail != "": CaptionText { text: root.detail; color: Theme.text-soft; }
         }
         Rectangle { horizontal-stretch: 1; background: transparent; }
-        if root.action-text != "": FlatButton { width: 92px; text: root.action-text; clicked => { root.action(); } }
+        if root.action-text != "": VerticalLayout {
+            width: 92px;
+            alignment: center;
+            FlatButton { text: root.action-text; clicked => { root.action(); } }
+        }
     }
 }
