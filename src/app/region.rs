@@ -4,38 +4,44 @@ use std::{
     cell::{Cell, RefCell},
     path::PathBuf,
     rc::Rc,
-    sync::mpsc::{self, Sender},
+    sync::{
+        Arc,
+        mpsc::{self, Sender},
+    },
     time::Duration,
 };
 
+use num_traits::ToPrimitive as _;
 use slint::ComponentHandle as _;
+use slint::winit_030::WinitWindowAccessor as _;
 
 use crate::{AppWindow, RegionWindow, views};
 use sharer::{
     capture,
     config::{CaptureResolution, ResizeQuality},
-    upload::UploadTarget,
+    upload::UploadCancellation,
 };
 
 use super::{
-    CAPTURE_HIDE_DELAY, Job, JobSource, RecordingControl, clear_last_receipt, show_error,
-    upload_status_detail, valid_window_lifetime, valid_window_upload_target,
+    CAPTURE_HIDE_DELAY, FailureStage, Job, JobSource, RecordingControl, UploadOptions,
+    clear_last_receipt, present_error, upload_status_detail, valid_window_lifetime,
+    valid_window_upload_target,
 };
 
 #[derive(Clone, Debug)]
 struct RegionUpload {
-    uploader: UploadTarget,
+    upload: Option<UploadOptions>,
     filename_stem: String,
     use_snapped_window_name: bool,
-    lifetime_seconds: u32,
     recording_fps: u32,
     recording_max_seconds: u32,
     capture_resolution: CaptureResolution,
     resize_quality: ResizeQuality,
     save_directory: Option<PathBuf>,
-    require_tor: bool,
     remove_exif: bool,
+    restore_window: bool,
     purpose: RegionPurpose,
+    cancellation: Arc<UploadCancellation>,
 }
 
 #[derive(Clone, Debug)]
@@ -44,27 +50,45 @@ enum RegionPurpose {
     Recording(RecordingControl),
 }
 
-pub(super) fn start_screenshot(window: &AppWindow, sender: Sender<Job>) {
-    begin_region_selection(window, sender, RegionPurpose::Screenshot);
+pub(super) fn start_screenshot(
+    window: &AppWindow,
+    sender: Sender<Job>,
+    cancellation: Arc<UploadCancellation>,
+) {
+    begin_region_selection(window, sender, RegionPurpose::Screenshot, cancellation);
 }
 
-fn begin_region_selection(window: &AppWindow, sender: Sender<Job>, purpose: RegionPurpose) {
-    let Some(uploader) = valid_window_upload_target(window) else {
-        return;
-    };
-
+fn begin_region_selection(
+    window: &AppWindow,
+    sender: Sender<Job>,
+    purpose: RegionPurpose,
+    cancellation: Arc<UploadCancellation>,
+) {
     if window.get_busy() {
         return;
     }
 
-    let Some(lifetime_seconds) = valid_window_lifetime(window) else {
-        return;
+    let upload = if window.get_auto_upload_captures() {
+        let Some(lifetime_seconds) = valid_window_lifetime(window) else {
+            return;
+        };
+        let Some(uploader) = valid_window_upload_target(window) else {
+            return;
+        };
+
+        Some(UploadOptions {
+            uploader,
+            lifetime_seconds,
+            require_tor: window.get_require_tor(),
+        })
+    } else {
+        None
     };
     let recording_fps = match views::settings::validated_recording_fps(window) {
         Ok(recording_fps) => recording_fps,
 
         Err(error) => {
-            show_error(window, &error.to_string());
+            present_error(window, FailureStage::Settings, &error.to_string());
 
             return;
         }
@@ -73,71 +97,83 @@ fn begin_region_selection(window: &AppWindow, sender: Sender<Job>, purpose: Regi
         Ok(seconds) => seconds,
 
         Err(error) => {
-            show_error(window, &error.to_string());
+            present_error(window, FailureStage::Settings, &error.to_string());
 
             return;
         }
     };
     let Ok(naming) = views::settings::naming_from_window(window) else {
-        show_error(window, "Choose a valid screenshot name");
+        present_error(
+            window,
+            FailureStage::Settings,
+            "Choose a valid screenshot name",
+        );
 
         return;
     };
-    let private_capture_names = window.get_private_capture_names();
-    let use_snapped_window_name =
-        !private_capture_names && naming.mode == sharer::config::CaptureNameMode::ActiveWindow;
+    let use_snapped_window_name = naming.mode == sharer::config::CaptureNameMode::ActiveWindow;
+    let save_directory = match views::settings::configured_capture_directory(window) {
+        Ok(directory) => directory,
+
+        Err(error) => {
+            present_error(window, FailureStage::Settings, &error.to_string());
+
+            return;
+        }
+    };
     let color_mode = capture_color_mode(window);
     let capture_resolution = capture_resolution(window);
+    let restore_window = window.window().is_visible() && !window.window().is_minimized();
 
     clear_last_receipt(window);
     window.set_busy(true);
     window.set_status_text("Select a region".into());
-    window.set_status_detail("Drag across the frozen screen  -  press Esc to cancel".into());
+    window.set_status_detail("Drag across the preview  -  press Esc to cancel".into());
     let _ = window.hide();
     let main_window = window.as_weak();
 
     slint::Timer::single_shot(CAPTURE_HIDE_DELAY, move || {
-        let capture = capture::capture_region_source(color_mode, capture_resolution);
+        let capture = capture::capture_region_sources(color_mode, capture_resolution);
         let Some(window) = main_window.upgrade() else {
             return;
         };
-        let filename_stem = match crate::naming::screenshot_stem(&naming, private_capture_names) {
+        let filename_stem = match crate::naming::screenshot_stem(&naming) {
             Ok(stem) => stem,
 
             Err(error) => {
-                let _ = window.show();
+                restore_window_if_needed(&window, restore_window);
 
-                show_error(&window, &error.to_string());
+                present_error(&window, FailureStage::Settings, &error.to_string());
 
                 return;
             }
         };
 
         match capture {
-            Ok(screen) => show_region_selector(
+            Ok(screens) => show_region_selectors(
                 &window,
-                sender,
-                screen,
-                RegionUpload {
-                    uploader,
+                &sender,
+                screens,
+                &RegionUpload {
+                    upload,
                     filename_stem,
                     use_snapped_window_name,
-                    lifetime_seconds,
                     recording_fps,
                     recording_max_seconds,
                     capture_resolution,
                     resize_quality: resize_quality(&window),
-                    save_directory: views::settings::configured_capture_directory(&window),
-                    require_tor: window.get_require_tor(),
+                    save_directory,
                     remove_exif: window.get_remove_exif(),
+                    restore_window,
                     purpose,
+                    cancellation,
                 },
             ),
 
             Err(error) => {
-                let _ = window.show();
+                restore_window_if_needed(&window, restore_window);
 
-                show_error(&window, &format!("{error:#}"));
+                present_error(&window, FailureStage::Capture, &format!("{error:#}"));
             }
         }
     });
@@ -168,144 +204,283 @@ pub(super) fn snap_changed(last: &Cell<Option<[f32; 4]>>, next: Option<[f32; 4]>
     }
 }
 
-fn show_region_selector(
+fn show_region_selectors(
     main_window: &AppWindow,
-    sender: Sender<Job>,
-    mut screen: capture::CapturedScreen,
-    upload: RegionUpload,
+    sender: &Sender<Job>,
+    screens: Vec<capture::CapturedScreen>,
+    upload: &RegionUpload,
 ) {
-    let selector = match RegionWindow::new() {
-        Ok(selector) => selector,
+    let holders = Rc::new(RefCell::new(Vec::<RegionWindow>::new()));
 
-        Err(error) => {
-            let _ = main_window.show();
+    for screen in screens {
+        let selector = match RegionWindow::new() {
+            Ok(selector) => selector,
 
-            show_error(
-                main_window,
-                &format!("failed to create region selector: {error}"),
-            );
+            Err(error) => {
+                dismiss_region_selectors(&holders);
+                restore_window_if_needed(main_window, upload.restore_window);
 
-            return;
-        }
-    };
-    let scaled_preview = screen.scaled_selector_preview();
-    let preview = scaled_preview.as_ref().unwrap_or_else(|| screen.preview());
-    let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
-        preview.as_raw(),
-        preview.width(),
-        preview.height(),
-    );
+                present_error(
+                    main_window,
+                    FailureStage::Capture,
+                    &format!("failed to create region selector: {error}"),
+                );
 
-    screen.release_redundant_buffers();
-
-    selector.set_capture_image(slint::Image::from_rgba8(pixels));
-    selector.set_selection_instruction(
-        match &upload.purpose {
-            RegionPurpose::Screenshot => "Drag to capture  -  click a window  -  Esc to cancel",
-            RegionPurpose::Recording(_) => "Drag to record  -  click a window  -  Esc to cancel",
-        }
-        .into(),
-    );
-    selector.window().set_fullscreen(true);
-    let holder = Rc::new(RefCell::new(Some(selector)));
-    let screen = Rc::new(screen);
-
-    if let Some(selector) = holder.borrow().as_ref() {
-        wire_region_hover(selector, Rc::clone(&screen));
-    }
-
-    let holder_for_selection = Rc::clone(&holder);
-    let main_weak = main_window.as_weak();
-
-    if let Some(selector) = holder.borrow().as_ref() {
-        selector.on_selected(move |x, y, width, height| {
-            dismiss_region_selector(&holder_for_selection);
-
-            let Some(window) = main_weak.upgrade() else {
                 return;
-            };
-
-            let region = capture::NormalizedRegion::new([x, y, width, height]);
-            let mut upload = upload.clone();
-
-            if upload.use_snapped_window_name
-                && let Some(title) = screen.window_title_for_region(region)
-            {
-                upload.filename_stem = crate::naming::window_title_stem(title);
             }
+        };
+        let pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::clone_from_slice(
+            screen.preview().as_raw(),
+            screen.preview().width(),
+            screen.preview().height(),
+        );
 
+        selector.set_capture_image(slint::Image::from_rgba8(pixels));
+        selector.set_selection_instruction(
             match &upload.purpose {
-                RegionPurpose::Screenshot => {
-                    queue_cropped_region(&window, &sender, &screen, region, &upload);
-                }
+                RegionPurpose::Screenshot => "Drag to capture  -  click a window  -  Esc to cancel",
 
-                RegionPurpose::Recording(recording_stop) => {
-                    start_region_recording(
-                        &window,
-                        &sender,
-                        &screen,
-                        region,
-                        &upload,
-                        recording_stop,
-                    );
+                RegionPurpose::Recording(_) => {
+                    "Drag to record  -  click a window  -  Esc to cancel"
                 }
             }
+            .into(),
+        );
+        let (x, y) = screen.selector_position();
+        let (width, height) = screen.selector_dimensions();
+
+        selector
+            .window()
+            .set_position(slint::PhysicalPosition::new(x, y));
+        selector
+            .window()
+            .set_size(slint::PhysicalSize::new(width, height));
+        let screen = Rc::new(screen);
+
+        wire_region_hover(&selector, Rc::clone(&screen));
+
+        let holders_for_selection = Rc::clone(&holders);
+        let main_weak = main_window.as_weak();
+        let sender = sender.clone();
+        let upload_for_selection = (*upload).clone();
+
+        selector.on_selected(move |x, y, width, height| {
+            handle_region_selection(
+                [x, y, width, height],
+                &screen,
+                &holders_for_selection,
+                &main_weak,
+                &sender,
+                upload_for_selection.clone(),
+            );
         });
-    }
 
-    let holder_for_cancel = Rc::clone(&holder);
-    let main_weak = main_window.as_weak();
+        let holders_for_cancel = Rc::clone(&holders);
+        let main_weak = main_window.as_weak();
+        let restore_window = upload.restore_window;
 
-    if let Some(selector) = holder.borrow().as_ref() {
         selector.on_cancelled(move || {
-            dismiss_region_selector(&holder_for_cancel);
+            dismiss_region_selectors(&holders_for_cancel);
 
             if let Some(window) = main_weak.upgrade() {
                 window.set_busy(false);
                 window.set_status_text("Ready".into());
                 window.set_status_detail("Region selection cancelled".into());
-                let _ = window.show();
+                restore_window_if_needed(&window, restore_window);
             }
         });
-        wire_region_close(selector);
+        wire_region_close(&selector);
 
         if let Err(error) = selector.show() {
-            let _ = main_window.show();
+            restore_window_if_needed(main_window, upload.restore_window);
+            dismiss_region_selectors(&holders);
 
-            dismiss_region_selector(&holder);
-
-            show_error(
+            present_error(
                 main_window,
+                FailureStage::Capture,
                 &format!("failed to show region selector: {error}"),
             );
+
+            return;
         }
+
+        stabilize_selector_on_monitor(&selector, x, y, width, height);
+
+        holders.borrow_mut().push(selector);
     }
+}
+
+fn handle_region_selection(
+    coordinates: [f32; 4],
+    screen: &capture::CapturedScreen,
+    holders: &Rc<RefCell<Vec<RegionWindow>>>,
+    main_window: &slint::Weak<AppWindow>,
+    sender: &Sender<Job>,
+    mut upload: RegionUpload,
+) {
+    let region = capture::NormalizedRegion::new(coordinates);
+
+    if upload.use_snapped_window_name
+        && let Some(title) = screen.window_title_for_region(region)
+    {
+        upload.filename_stem = crate::naming::window_title_stem(title);
+    }
+
+    let schedule = |action: Box<dyn FnOnce(&AppWindow)>| {
+        let main_window = main_window.clone();
+
+        dismiss_region_selectors_then(holders, move || {
+            if let Some(window) = main_window.upgrade() {
+                action(&window);
+            }
+        });
+    };
+    let selected = match upload.purpose.clone() {
+        RegionPurpose::Screenshot => screen
+            .selected_region_capture(region)
+            .map(RegionSelection::Screenshot),
+
+        RegionPurpose::Recording(recording_stop) => screen
+            .desktop_region(region)
+            .map(|region| RegionSelection::Recording(region, recording_stop)),
+    };
+    let selected = match selected {
+        Ok(selected) => selected,
+
+        Err(error) => {
+            let restore_window = upload.restore_window;
+
+            schedule(Box::new(move |window| {
+                restore_window_if_needed(window, restore_window);
+                present_error(window, FailureStage::Capture, &format!("{error:#}"));
+            }));
+
+            return;
+        }
+    };
+    let sender = sender.clone();
+
+    schedule(Box::new(move |window| match selected {
+        RegionSelection::Screenshot(selection) => {
+            queue_cropped_region(window, &sender, selection, &upload);
+        }
+
+        RegionSelection::Recording(region, recording_stop) => {
+            start_region_recording(window, &sender, region, &upload, &recording_stop);
+        }
+    }));
+}
+
+enum RegionSelection {
+    Screenshot(capture::SelectedRegionCapture),
+    Recording(capture::DesktopRegion, RecordingControl),
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stabilize_selector_on_monitor(selector: &RegionWindow, x: i32, y: i32, width: u32, height: u32) {
+    let positioned = selector.window().with_winit_window(|native_window| {
+        let monitor = native_window.available_monitors().find(|monitor| {
+            let position = monitor.position();
+
+            position.x == x && position.y == y
+        });
+
+        if let Some(monitor) = monitor {
+            native_window.set_fullscreen(Some(
+                slint::winit_030::winit::window::Fullscreen::Borderless(Some(monitor)),
+            ));
+            native_window
+                .set_window_level(slint::winit_030::winit::window::WindowLevel::AlwaysOnTop);
+            native_window.request_redraw();
+            true
+        } else {
+            false
+        }
+    });
+
+    if positioned != Some(true) {
+        selector
+            .window()
+            .set_position(slint::PhysicalPosition::new(x, y));
+        selector
+            .window()
+            .set_size(slint::PhysicalSize::new(width, height));
+        selector.window().request_redraw();
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn stabilize_selector_on_monitor(
+    selector: &RegionWindow,
+    _x: i32,
+    _y: i32,
+    _width: u32,
+    _height: u32,
+) {
+    selector.window().set_fullscreen(true);
+    selector.window().request_redraw();
 }
 
 fn wire_region_hover(selector: &RegionWindow, screen: Rc<capture::CapturedScreen>) {
     let selector_weak = selector.as_weak();
     let last_snap = Cell::new(None);
+    let (screen_width, screen_height) = screen.selector_dimensions();
 
-    selector.on_window_hovered(move |x, y| {
-        let Some(selector) = selector_weak.upgrade() else {
-            return;
-        };
-        let next_snap = screen.window_region_at([x, y]);
+    selector
+        .window()
+        .on_winit_window_event(move |_window, event| {
+            let Some(selector) = selector_weak.upgrade() else {
+                return slint::winit_030::EventResult::Propagate;
+            };
 
-        if !snap_changed(&last_snap, next_snap) {
-            return;
-        }
+            match event {
+                slint::winit_030::winit::event::WindowEvent::CursorMoved { position, .. } => {
+                    if screen_width > 0 && screen_height > 0 {
+                        let point = [
+                            (position.x / f64::from(screen_width))
+                                .to_f32()
+                                .unwrap_or(0.0),
+                            (position.y / f64::from(screen_height))
+                                .to_f32()
+                                .unwrap_or(0.0),
+                        ];
+                        let target = screen.window_target_at(point);
+                        let next_snap =
+                            Some(target.map_or([0.0, 0.0, 1.0, 1.0], |(bounds, _title)| bounds));
 
-        if let Some(region) = next_snap {
-            selector.set_snap_x(region[0]);
-            selector.set_snap_y(region[1]);
-            selector.set_snap_width(region[2]);
-            selector.set_snap_height(region[3]);
-            selector.set_snap_active(true);
-        } else {
-            selector.set_snap_active(false);
-        }
-    });
+                        update_selector_snap(&selector, &last_snap, next_snap);
+                    }
+                }
+
+                slint::winit_030::winit::event::WindowEvent::CursorLeft { .. } => {
+                    update_selector_snap(&selector, &last_snap, None);
+                }
+
+                _ => {}
+            }
+
+            slint::winit_030::EventResult::Propagate
+        });
+}
+
+fn update_selector_snap(
+    selector: &RegionWindow,
+    last_snap: &Cell<Option<[f32; 4]>>,
+    next_snap: Option<[f32; 4]>,
+) {
+    if !snap_changed(last_snap, next_snap) {
+        return;
+    }
+
+    if let Some(region) = next_snap {
+        selector.set_snap_x(region[0]);
+        selector.set_snap_y(region[1]);
+        selector.set_snap_width(region[2]);
+        selector.set_snap_height(region[3]);
+        selector.set_snap_active(true);
+    } else {
+        selector.set_snap_active(false);
+    }
 }
 
 fn wire_region_close(selector: &RegionWindow) {
@@ -320,30 +495,54 @@ fn wire_region_close(selector: &RegionWindow) {
     });
 }
 
-fn dismiss_region_selector(holder: &Rc<RefCell<Option<RegionWindow>>>) {
-    if let Some(selector) = holder.borrow().as_ref() {
+fn dismiss_region_selectors(holders: &Rc<RefCell<Vec<RegionWindow>>>) {
+    dismiss_region_selectors_then(holders, || {});
+}
+
+fn dismiss_region_selectors_then(
+    holders: &Rc<RefCell<Vec<RegionWindow>>>,
+    after_dismiss: impl FnOnce() + 'static,
+) {
+    for selector in holders.borrow().iter() {
         let _ = selector.hide();
     }
 
     // Defer component destruction until its active callback unwinds.
-    let holder = Rc::clone(holder);
+    let holders = Rc::clone(holders);
 
     slint::Timer::single_shot(Duration::ZERO, move || {
-        drop(holder.borrow_mut().take());
+        holders.borrow_mut().clear();
+        after_dismiss();
     });
+}
+
+fn restore_window_if_needed(window: &AppWindow, restore: bool) {
+    if restore {
+        let _ = window.show();
+
+        super::foreground_ui(window);
+    }
 }
 
 pub(super) fn toggle_recording(
     window: &AppWindow,
     sender: &Sender<Job>,
     recording_stop: &RecordingControl,
+    cancellation: Arc<UploadCancellation>,
 ) {
     if let Some(stop) = recording_stop.borrow_mut().take() {
         let _ = stop.send(());
 
         window.set_recording(false);
         window.set_status_text("Encoding recording...".into());
-        window.set_status_detail("Finishing the animated WebP before upload".into());
+        window.set_status_detail(
+            if window.get_auto_upload_captures() {
+                "Finishing the animated WebP before upload"
+            } else {
+                "Finishing the animated WebP for local storage"
+            }
+            .into(),
+        );
 
         return;
     }
@@ -353,7 +552,7 @@ pub(super) fn toggle_recording(
     }
 
     if let Err(error) = capture::ensure_recording_supported() {
-        show_error(window, &error.to_string());
+        present_error(window, FailureStage::Capture, &error.to_string());
 
         return;
     }
@@ -362,93 +561,103 @@ pub(super) fn toggle_recording(
         window,
         sender.clone(),
         RegionPurpose::Recording(Rc::clone(recording_stop)),
+        cancellation,
     );
 }
 
 fn queue_cropped_region(
     window: &AppWindow,
     sender: &Sender<Job>,
-    screen: &capture::CapturedScreen,
-    region: capture::NormalizedRegion,
+    selection: capture::SelectedRegionCapture,
     upload: &RegionUpload,
 ) {
-    let payload = match capture::crop_captured_region(
-        screen,
-        region,
-        upload.capture_resolution,
-        upload.resize_quality,
-    ) {
-        Ok(mut payload) => {
-            payload.filename =
-                capture::named_capture_filename(&upload.filename_stem, &payload.filename);
-            payload
-        }
+    let window = window.as_weak();
+    let sender = sender.clone();
+    let upload = upload.clone();
 
-        Err(error) => {
-            let _ = window.show();
-
-            show_error(window, &format!("{error:#}"));
-
+    // Hidden selector components can remain in a compositor frame after destruction. Keep every
+    // ShareR window hidden until that frame has cleared before asking the worker to recapture.
+    slint::Timer::single_shot(CAPTURE_HIDE_DELAY, move || {
+        let Some(window) = window.upgrade() else {
             return;
-        }
-    };
+        };
 
-    let _ = window.show();
+        send_cropped_region_job(&window, &sender, selection, &upload);
+    });
+}
 
-    window.set_uploading(true);
+fn send_cropped_region_job(
+    window: &AppWindow,
+    sender: &Sender<Job>,
+    selection: capture::SelectedRegionCapture,
+    upload: &RegionUpload,
+) {
     window.set_upload_progress(0.0);
-    window.set_status_text("Uploading...".into());
-    window
-        .set_status_detail(upload_status_detail(&upload.uploader, upload.lifetime_seconds).into());
+
+    if let Some(options) = &upload.upload {
+        if upload.save_directory.is_some() {
+            window.set_uploading(false);
+            window.set_status_text("Saving capture...".into());
+            window.set_status_detail("Keeping a local copy before upload".into());
+        } else {
+            window.set_uploading(true);
+            window.set_status_text("Uploading...".into());
+            window.set_status_detail(
+                upload_status_detail(&options.uploader, options.lifetime_seconds).into(),
+            );
+        }
+    } else {
+        window.set_uploading(false);
+        window.set_status_text("Saving capture...".into());
+        window.set_status_detail("Keeping this capture on your computer".into());
+    }
+
+    upload.cancellation.reset();
 
     if sender
         .send(Job {
-            source: JobSource::Prepared {
-                payload,
+            source: JobSource::RegionCapture {
+                selection,
+                filename_stem: upload.filename_stem.clone(),
+                capture_resolution: upload.capture_resolution,
+                resize_quality: upload.resize_quality,
                 save_directory: upload.save_directory.clone(),
             },
-            uploader: upload.uploader.clone(),
-            lifetime_seconds: upload.lifetime_seconds,
-            require_tor: upload.require_tor,
+            upload: upload.upload.clone(),
             remove_exif: upload.remove_exif,
+            cancellation: Arc::clone(&upload.cancellation),
+            restore_window_after_capture: upload.restore_window,
         })
         .is_err()
     {
-        let _ = window.show();
+        restore_window_if_needed(window, upload.restore_window);
 
-        show_error(window, "Upload worker stopped unexpectedly");
+        present_error(
+            window,
+            FailureStage::Capture,
+            "Capture worker stopped unexpectedly",
+        );
     }
 }
 
 fn start_region_recording(
     window: &AppWindow,
     sender: &Sender<Job>,
-    screen: &capture::CapturedScreen,
-    region: capture::NormalizedRegion,
+    region: capture::DesktopRegion,
     upload: &RegionUpload,
     recording_stop: &RecordingControl,
 ) {
-    let region = match screen.desktop_region(region) {
-        Ok(region) => region,
-
-        Err(error) => {
-            let _ = window.show();
-
-            show_error(window, &format!("{error:#}"));
-
-            return;
-        }
-    };
     let (stop_sender, stop_receiver) = mpsc::channel();
 
     *recording_stop.borrow_mut() = Some(stop_sender);
     window.set_recording(true);
     window.set_busy(true);
-    window.set_uploading(true);
+    window.set_uploading(false);
     window.set_upload_progress(0.0);
     window.set_status_text("Recording region...".into());
     window.set_status_detail("Press Record again or use its shortcut to stop".into());
-    let _ = window.show();
+    restore_window_if_needed(window, upload.restore_window);
+    upload.cancellation.reset();
 
     if sender
         .send(Job {
@@ -461,15 +670,19 @@ fn start_region_recording(
                 capture_resolution: upload.capture_resolution,
                 save_directory: upload.save_directory.clone(),
             },
-            uploader: upload.uploader.clone(),
-            lifetime_seconds: upload.lifetime_seconds,
-            require_tor: upload.require_tor,
+            upload: upload.upload.clone(),
             remove_exif: upload.remove_exif,
+            cancellation: Arc::clone(&upload.cancellation),
+            restore_window_after_capture: false,
         })
         .is_err()
     {
         *recording_stop.borrow_mut() = None;
         window.set_recording(false);
-        show_error(window, "Upload worker stopped unexpectedly");
+        present_error(
+            window,
+            FailureStage::Capture,
+            "Capture worker stopped unexpectedly",
+        );
     }
 }

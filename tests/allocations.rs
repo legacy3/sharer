@@ -74,7 +74,7 @@ fn moving_a_receipt_into_history_does_not_allocate() {
     };
     let mut entry = None;
     let allocations = measure(|| {
-        entry = Some(HistoryEntry::from_receipt(receipt));
+        entry = Some(HistoryEntry::from_receipt(receipt, None));
     });
 
     assert_eq!(allocations.count_total, 0);

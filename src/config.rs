@@ -46,6 +46,7 @@ pub struct AppConfig {
 )]
 pub struct BehaviorConfig {
     pub save_captures: bool,
+    pub auto_upload_captures: bool,
     pub force_sdr_captures: bool,
     pub capture_resolution: CaptureResolution,
     #[serde(alias = "downscale_filter")]
@@ -53,18 +54,63 @@ pub struct BehaviorConfig {
     pub minimize_to_tray: bool,
     pub start_at_login: bool,
     pub completion_sound: bool,
+    pub tray_click_action: TrayClickAction,
 }
 
 impl Default for BehaviorConfig {
     fn default() -> Self {
         Self {
             save_captures: true,
+            auto_upload_captures: false,
             force_sdr_captures: false,
             capture_resolution: CaptureResolution::Native,
             resize_quality: ResizeQuality::Fast,
             minimize_to_tray: true,
             start_at_login: false,
             completion_sound: false,
+            tray_click_action: TrayClickAction::Region,
+        }
+    }
+}
+
+/// Action invoked by a single left click on the tray icon.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayClickAction {
+    #[default]
+    Region,
+    Show,
+    Screenshot,
+    Recording,
+    Clipboard,
+    None,
+}
+
+impl TrayClickAction {
+    /// Convert a desktop selector index to a tray click action.
+    #[must_use]
+    pub const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::Region),
+            1 => Some(Self::Show),
+            2 => Some(Self::Screenshot),
+            3 => Some(Self::Recording),
+            4 => Some(Self::Clipboard),
+            5 => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// Convert the action to the desktop selector index.
+    #[must_use]
+    pub const fn index(self) -> i32 {
+        match self {
+            Self::Region => 0,
+            Self::Show => 1,
+            Self::Screenshot => 2,
+            Self::Recording => 3,
+            Self::Clipboard => 4,
+            Self::None => 5,
         }
     }
 }
@@ -140,11 +186,12 @@ impl CaptureResolution {
     }
 }
 
-/// Privacy controls for capture names, image metadata, and network routing.
+/// Privacy controls for image metadata and network routing.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct PrivacyConfig {
     pub require_tor: bool,
+    /// Retained only to migrate the original private-name checkbox.
     #[serde(alias = "strip_capture_metadata")]
     pub private_capture_names: bool,
     pub remove_exif: bool,
@@ -208,6 +255,7 @@ pub enum CaptureNameMode {
     #[default]
     ActiveWindow,
     Random,
+    Friendly,
     Custom,
 }
 
@@ -218,7 +266,8 @@ impl CaptureNameMode {
         match index {
             0 => Some(Self::ActiveWindow),
             1 => Some(Self::Random),
-            2 => Some(Self::Custom),
+            2 => Some(Self::Friendly),
+            3 => Some(Self::Custom),
             _ => None,
         }
     }
@@ -229,7 +278,8 @@ impl CaptureNameMode {
         match self {
             Self::ActiveWindow => 0,
             Self::Random => 1,
-            Self::Custom => 2,
+            Self::Friendly => 2,
+            Self::Custom => 3,
         }
     }
 }
@@ -238,12 +288,13 @@ impl Default for CaptureNamingConfig {
     fn default() -> Self {
         Self {
             mode: CaptureNameMode::ActiveWindow,
-            custom_name: "screenshot".to_owned(),
+            custom_name: String::new(),
         }
     }
 }
 
 /// User-editable global shortcut strings understood by `global-hotkey`.
+/// An empty string disables the corresponding action's shortcut.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct ShortcutConfig {
@@ -292,6 +343,17 @@ impl AppConfig {
             config.recording_max_seconds = DEFAULT_RECORDING_SECONDS;
         }
 
+        if config.privacy.private_capture_names {
+            config.capture_naming.mode = CaptureNameMode::Random;
+            config.privacy.private_capture_names = false;
+        }
+
+        if config.capture_naming.mode != CaptureNameMode::Custom
+            && config.capture_naming.custom_name == "screenshot"
+        {
+            config.capture_naming.custom_name.clear();
+        }
+
         Ok(config)
     }
 
@@ -304,7 +366,15 @@ impl AppConfig {
         validate_lifetime(self.lifetime_seconds)?;
         validate_recording_fps(self.recording_fps)?;
         validate_recording_seconds(self.recording_max_seconds)?;
-        self.upload_target().validate()?;
+        anyhow::ensure!(
+            self.behavior.save_captures || self.behavior.auto_upload_captures,
+            "enable local capture copies or automatic capture uploads"
+        );
+
+        if self.behavior.auto_upload_captures {
+            self.upload_target().validate()?;
+        }
+
         let contents = serde_json::to_vec_pretty(self).context("failed to encode configuration")?;
 
         storage
@@ -436,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_metadata_privacy_setting_migrates_to_private_names() {
+    fn legacy_metadata_privacy_setting_is_still_readable() {
         let privacy =
             serde_json::from_str::<PrivacyConfig>(r#"{"strip_capture_metadata":true}"#).unwrap();
 
@@ -471,5 +541,50 @@ mod tests {
             serde_json::from_str::<AppConfig>(r#"{"downscale_filter":"lanczos3"}"#).unwrap();
 
         assert_eq!(migrated.behavior.resize_quality, ResizeQuality::Sharp);
+    }
+
+    #[test]
+    fn new_configs_keep_captures_local_and_use_region_tray_clicks() {
+        let config = AppConfig::default();
+
+        assert!(config.behavior.save_captures);
+        assert!(!config.behavior.auto_upload_captures);
+        assert_eq!(config.behavior.tray_click_action, TrayClickAction::Region);
+        assert_eq!(config.capture_naming.mode, CaptureNameMode::ActiveWindow);
+        assert!(config.capture_naming.custom_name.is_empty());
+        assert_eq!(
+            CaptureNameMode::from_index(2),
+            Some(CaptureNameMode::Friendly)
+        );
+        assert_eq!(
+            CaptureNameMode::from_index(3),
+            Some(CaptureNameMode::Custom)
+        );
+    }
+
+    #[test]
+    fn tray_click_actions_round_trip_selector_indices() {
+        let actions = [
+            TrayClickAction::Region,
+            TrayClickAction::Show,
+            TrayClickAction::Screenshot,
+            TrayClickAction::Recording,
+            TrayClickAction::Clipboard,
+            TrayClickAction::None,
+        ];
+
+        for action in actions {
+            assert_eq!(TrayClickAction::from_index(action.index()), Some(action));
+        }
+
+        assert_eq!(TrayClickAction::from_index(6), None);
+        assert_eq!(
+            serde_json::to_string(&TrayClickAction::None).unwrap(),
+            r#""none""#
+        );
+        assert_eq!(
+            serde_json::from_str::<TrayClickAction>(r#""none""#).unwrap(),
+            TrayClickAction::None
+        );
     }
 }

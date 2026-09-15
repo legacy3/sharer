@@ -36,14 +36,14 @@ export component PageHeading inherits Text {
 
 export component SectionHeading inherits Text {
     color: Theme.text-muted;
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     letter-spacing: 1.2px;
 }
 
 export component CaptionText inherits Text {
     color: Theme.text-muted;
-    font-size: 9px;
+    font-size: 11px;
     overflow: elide;
 }
 
@@ -93,8 +93,8 @@ export component ActionCard inherits Rectangle {
         VerticalLayout {
             alignment: center;
             spacing: 1px;
-            Text { text: root.title; color: root.enabled ? Theme.text : Theme.text-muted; font-size: 11px; font-weight: 700; overflow: elide; }
-            CaptionText { text: root.subtitle; color: Theme.text-soft; font-size: 8px; }
+            Text { text: root.title; color: root.enabled ? Theme.text : Theme.text-muted; font-size: 13px; font-weight: 700; overflow: elide; }
+            CaptionText { text: root.subtitle; color: Theme.text-soft; font-size: 10px; }
         }
     }
 
@@ -151,8 +151,8 @@ export component FlatButton inherits Rectangle {
             horizontal-stretch: 0;
             text: root.text;
             color: !root.enabled ? Theme.text-muted : (root.primary ? Theme.bg : Theme.text);
-            font-size: 10px;
-            font-weight: 650;
+            font-size: 12px;
+            font-weight: 600;
             horizontal-alignment: center;
             vertical-alignment: center;
             overflow: elide;
@@ -196,7 +196,7 @@ export component SelectableButton inherits Rectangle {
     Text {
         text: root.text;
         color: root.selected ? Theme.primary-bright : Theme.text-soft;
-        font-size: root.outlined ? 9px : 10px;
+        font-size: root.outlined ? 11px : 12px;
         font-weight: root.selected ? 700 : 600;
         horizontal-alignment: center;
         vertical-alignment: center;
@@ -273,7 +273,7 @@ export component NavButton inherits Rectangle {
         padding-right: 10px;
         spacing: 9px;
         IconBox { icon-source: root.icon-source; tint: root.selected ? Theme.primary-bright : Theme.text-soft; icon-size: 15px; box-width: 18px; }
-        Text { text: root.text; color: root.selected ? Theme.text : Theme.text-soft; font-size: 11px; font-weight: root.selected ? 700 : 550; vertical-alignment: center; }
+        Text { text: root.text; color: root.selected ? Theme.text : Theme.text-soft; font-size: 13px; font-weight: root.selected ? 700 : 500; vertical-alignment: center; }
     }
     focus := FocusScope {
         width: 0px;
@@ -291,7 +291,7 @@ export component NavButton inherits Rectangle {
 
 export component FieldLabel inherits Text {
     color: Theme.text-soft;
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 600;
     vertical-alignment: center;
 }
@@ -343,7 +343,7 @@ export component CompactSelect inherits Rectangle {
         Text {
             text: root.current-index >= 0 && root.current-index < root.model.length ? root.model[root.current-index] : "";
             color: Theme.text;
-            font-size: 10px;
+            font-size: 12px;
             font-weight: 600;
             vertical-alignment: center;
             overflow: elide;
@@ -388,8 +388,8 @@ export component CompactSelect inherits Rectangle {
                     Text {
                         text: label;
                         color: index == root.current-index ? Theme.primary-bright : Theme.text;
-                        font-size: 10px;
-                        font-weight: index == root.current-index ? 700 : 550;
+                        font-size: 12px;
+                        font-weight: index == root.current-index ? 700 : 500;
                         vertical-alignment: center;
                         x: 7px;
                         width: parent.width - 14px;
@@ -437,7 +437,7 @@ export component NumberStepper inherits Rectangle {
             }
         }
         Rectangle { width: 1px; background: Theme.border; }
-        Text { text: "\{root.value}"; color: Theme.text; font-size: 10px; font-weight: 650; horizontal-alignment: center; vertical-alignment: center; }
+        Text { text: "\{root.value}"; color: Theme.text; font-size: 12px; font-weight: 600; horizontal-alignment: center; vertical-alignment: center; }
         Rectangle { width: 1px; background: Theme.border; }
         plus := Rectangle {
             width: 24px;
@@ -475,7 +475,7 @@ export component InlineNotice inherits Rectangle {
         VerticalLayout {
             alignment: center;
             spacing: 0px;
-            Text { text: root.text; color: Theme.text; font-size: 10px; font-weight: 700; overflow: elide; }
+            Text { text: root.text; color: Theme.text; font-size: 12px; font-weight: 700; overflow: elide; }
             if root.detail != "": CaptionText { text: root.detail; color: Theme.text-soft; }
         }
         Rectangle { horizontal-stretch: 1; background: transparent; }

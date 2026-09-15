@@ -18,11 +18,8 @@ impl Entropy for SystemEntropy {
     }
 }
 
-pub(super) fn screenshot_stem(
-    config: &CaptureNamingConfig,
-    private_capture_names: bool,
-) -> Result<String> {
-    match effective_name_mode(config.mode, private_capture_names) {
+pub(super) fn screenshot_stem(config: &CaptureNamingConfig) -> Result<String> {
+    match config.mode {
         CaptureNameMode::ActiveWindow => {
             let title = sharer::capture::active_window_title()
                 .filter(|title| !title.eq_ignore_ascii_case("ShareR"));
@@ -32,26 +29,40 @@ pub(super) fn screenshot_stem(
 
         CaptureNameMode::Random => random_stem(&SystemEntropy),
 
+        CaptureNameMode::Friendly => friendly_stem(&SystemEntropy),
+
         CaptureNameMode::Custom => Ok(sanitize_stem(&config.custom_name)),
     }
 }
 
-const fn effective_name_mode(
-    configured: CaptureNameMode,
-    private_capture_names: bool,
-) -> CaptureNameMode {
-    if private_capture_names {
-        CaptureNameMode::Random
-    } else {
-        configured
-    }
-}
-
 fn random_stem(entropy: &impl Entropy) -> Result<String> {
-    let mut bytes = [0_u8; 5];
+    let mut bytes = [0_u8; 16];
 
     entropy.fill(&mut bytes)?;
     Ok(hex::encode(bytes))
+}
+
+fn friendly_stem(entropy: &impl Entropy) -> Result<String> {
+    const ADJECTIVES: [&str; 32] = [
+        "amber", "brave", "bright", "calm", "clever", "cosmic", "crisp", "daring", "dusky",
+        "eager", "fancy", "gentle", "golden", "happy", "hidden", "jolly", "kind", "lively",
+        "lucky", "mellow", "mighty", "nimble", "quiet", "rapid", "royal", "silver", "solar",
+        "swift", "tidy", "vivid", "warm", "wild",
+    ];
+    const ANIMALS: [&str; 32] = [
+        "badger", "bear", "beaver", "bison", "cat", "crane", "deer", "dolphin", "eagle", "falcon",
+        "fox", "gecko", "hare", "heron", "ibis", "koala", "lynx", "marten", "moose", "otter",
+        "owl", "panda", "puma", "raven", "seal", "shark", "tiger", "toucan", "turtle", "whale",
+        "wolf", "yak",
+    ];
+    let mut bytes = [0_u8; 4];
+
+    entropy.fill(&mut bytes)?;
+    let adjective = ADJECTIVES[usize::from(bytes[0]) % ADJECTIVES.len()];
+    let animal = ANIMALS[usize::from(bytes[1]) % ANIMALS.len()];
+    let number = u16::from_le_bytes([bytes[2], bytes[3]]) % 10_000;
+
+    Ok(format!("{adjective}-{animal}-{number:04}"))
 }
 
 fn sanitize_stem(value: &str) -> String {
@@ -143,7 +154,12 @@ mod tests {
 
     impl Entropy for FixedEntropy {
         fn fill(&self, bytes: &mut [u8]) -> Result<()> {
-            bytes.copy_from_slice(&[0x01, 0x23, 0x45, 0x67, 0x89]);
+            let pattern = [0x01, 0x23, 0x45, 0x67, 0x89];
+
+            for (index, byte) in bytes.iter_mut().enumerate() {
+                *byte = pattern[index % pattern.len()];
+            }
+
             Ok(())
         }
     }
@@ -158,23 +174,15 @@ mod tests {
     }
 
     #[test]
-    fn random_names_are_short_and_stable_for_injected_entropy() {
-        assert_eq!(random_stem(&FixedEntropy).unwrap(), "0123456789");
+    fn random_names_use_a_full_128_bits_of_entropy() {
+        assert_eq!(
+            random_stem(&FixedEntropy).unwrap(),
+            "01234567890123456789012345678901"
+        );
     }
 
     #[test]
-    fn private_names_override_window_and_static_names() {
-        assert_eq!(
-            effective_name_mode(CaptureNameMode::ActiveWindow, true),
-            CaptureNameMode::Random
-        );
-        assert_eq!(
-            effective_name_mode(CaptureNameMode::Custom, true),
-            CaptureNameMode::Random
-        );
-        assert_eq!(
-            effective_name_mode(CaptureNameMode::Custom, false),
-            CaptureNameMode::Custom
-        );
+    fn friendly_names_are_readable_and_include_a_numeric_suffix() {
+        assert_eq!(friendly_stem(&FixedEntropy).unwrap(), "brave-bison-6437");
     }
 }

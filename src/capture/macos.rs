@@ -22,8 +22,8 @@ use screencapturekit::{
 };
 
 use super::{
-    CaptureColorMode, CapturedScreen, DesktopBounds, DesktopRegion, WindowRegion, encode_sdr_png,
-    intersect_bounds, resize_rgba,
+    CaptureColorMode, CapturedScreen, DesktopBounds, DesktopRegion, WindowRegion,
+    bounded_selector_preview, encode_sdr_png, intersect_bounds, resize_rgba,
 };
 use crate::config::{CaptureResolution, ResizeQuality};
 use crate::upload::UploadPayload;
@@ -229,17 +229,39 @@ pub(super) fn capture_primary(
 pub(super) fn capture_region_source(
     color_mode: CaptureColorMode,
     capture_resolution: CaptureResolution,
+    preview_pixel_budget: u64,
 ) -> Result<CapturedScreen> {
     let _ = color_mode;
     let _ = capture_resolution;
     let prepared = prepare_primary_display()?;
-    let preview = capture_image(&prepared)?;
+    let preview = bounded_selector_preview(capture_image(&prepared)?, preview_pixel_budget);
 
     Ok(CapturedScreen {
         preview,
         desktop_bounds: prepared.desktop_bounds,
         window_regions: prepared.window_regions,
     })
+}
+
+pub(super) fn capture_selected_region(
+    region: DesktopRegion,
+    capture_resolution: CaptureResolution,
+    resize_quality: ResizeQuality,
+) -> Result<UploadPayload> {
+    let capturer = RegionCapturer::new(region, capture_resolution)?;
+    let (width, height) = capturer.dimensions();
+    let pixels = capturer.capture_rgba()?;
+    let image = RgbaImage::from_raw(width, height, pixels)
+        .context("ScreenCaptureKit returned invalid region dimensions")?;
+    let image = if capture_resolution == CaptureResolution::Logical
+        && image.dimensions() != (region.width(), region.height())
+    {
+        resize_rgba(&image, region.width(), region.height(), resize_quality)
+    } else {
+        image
+    };
+
+    encode_sdr_png(image, "region.png")
 }
 
 pub(super) fn active_window_title() -> Option<String> {
@@ -431,6 +453,7 @@ fn visible_window_regions(
 
             (width > 0.02 && height > 0.02).then_some(WindowRegion {
                 bounds: [x, y, width, height],
+                desktop_bounds: bounds,
                 title,
             })
         })

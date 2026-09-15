@@ -42,20 +42,19 @@ use std::{io::Write as _, process::ExitCode};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser as _;
-use cli::Cli;
+use cli::{Cli, RendererPreference};
 use sharer::{
     clipboard,
     config::AppConfig,
     history::HistoryEntry,
     proxy::preferred_upload_route,
-    storage::{PlatformStorage, default_capture_directory},
+    storage::{PlatformStorage, default_capture_directory, monthly_capture_directory},
     upload::{UploadClient, UploadPayload, UploadTarget, UploaderKind, validate_uploader_url},
 };
 #[cfg(feature = "desktop")]
 use slint_generated::{AppWindow, HistoryRow, RegionWindow};
 
 fn main() -> ExitCode {
-    configure_low_memory_window_hiding();
     let cli = Cli::parse();
 
     prepare_windows_console(cli.is_headless());
@@ -63,7 +62,7 @@ fn main() -> ExitCode {
     let result = if cli.is_headless() {
         run_headless(&cli, &mut output)
     } else {
-        run_desktop(cli.background)
+        run_desktop(cli.background, cli.renderer)
     };
 
     match result {
@@ -78,21 +77,6 @@ fn main() -> ExitCode {
     }
 }
 
-#[cfg(feature = "desktop")]
-#[expect(
-    unsafe_code,
-    reason = "Rust 2024 requires an unsafe block for a process-wide variable set before threads"
-)]
-fn configure_low_memory_window_hiding() {
-    // SAFETY: This runs before the process starts any threads.
-    unsafe {
-        std::env::set_var("SLINT_DESTROY_WINDOW_ON_HIDE", "1");
-    }
-}
-
-#[cfg(not(feature = "desktop"))]
-const fn configure_low_memory_window_hiding() {}
-
 #[cfg(windows)]
 fn prepare_windows_console(headless: bool) {
     if !cfg!(feature = "desktop") || headless {
@@ -104,12 +88,12 @@ fn prepare_windows_console(headless: bool) {
 const fn prepare_windows_console(_headless: bool) {}
 
 #[cfg(feature = "desktop")]
-fn run_desktop(background: bool) -> Result<()> {
-    app::run(!background)
+fn run_desktop(background: bool, renderer: RendererPreference) -> Result<()> {
+    app::run(!background, renderer)
 }
 
 #[cfg(not(feature = "desktop"))]
-fn run_desktop(_background: bool) -> Result<()> {
+fn run_desktop(_background: bool, _renderer: RendererPreference) -> Result<()> {
     bail!("desktop UI is not included in this build; rebuild with `--features desktop`")
 }
 
@@ -156,17 +140,21 @@ fn run_headless(cli: &Cli, output: &mut impl std::io::Write) -> Result<()> {
         bail!("no headless upload source was selected");
     };
 
-    if cli.screenshot && config.behavior.save_captures {
+    let local_screenshot = if cli.screenshot && config.behavior.save_captures {
         let directory = if config.capture_directory.trim().is_empty() {
             default_capture_directory()?
         } else {
             config.capture_directory.as_str().into()
         };
 
-        payload
-            .save_generated_copy(&directory)
-            .context("failed to retain local screenshot")?;
-    }
+        Some(
+            payload
+                .save_generated_copy(&monthly_capture_directory(&directory))
+                .context("failed to retain local screenshot")?,
+        )
+    } else {
+        None
+    };
 
     if config.privacy.remove_exif && !cli.screenshot {
         payload
@@ -174,24 +162,32 @@ fn run_headless(cli: &Cli, output: &mut impl std::io::Write) -> Result<()> {
             .context("failed to remove image EXIF metadata")?;
     }
 
-    let route = preferred_upload_route(cli.require_tor || config.privacy.require_tor)?;
-    let receipt = UploadClient::for_target(&target, &route)?
-        .upload(payload, lifetime)
-        .context("upload failed")?;
-    let entry = HistoryEntry::from_receipt(receipt);
+    let captured_filename = payload.filename.clone();
+    let captured_size = payload.len();
+    let receipt = (|| -> Result<_> {
+        let route = preferred_upload_route(cli.require_tor || config.privacy.require_tor)?;
 
-    storage.insert_history(&entry).with_context(|| {
-        format!(
-            "upload succeeded, but saving it to history failed; deletion URL: {}",
-            entry.delete_url
-        )
-    })?;
+        UploadClient::for_target(&target, &route)?.upload(payload, lifetime)
+    })();
+    let entry = match receipt {
+        Ok(receipt) => HistoryEntry::from_receipt(receipt, local_screenshot.as_deref()),
 
-    writeln!(output, "{}", entry.link).with_context(|| {
-        format!(
-            "upload succeeded and was saved to history, but writing its link failed; deletion URL: {}",
-            entry.delete_url
-        )
+        Err(upload_error) => {
+            let Some(path) = local_screenshot.as_deref() else {
+                return Err(upload_error).context("upload failed");
+            };
+
+            return retain_local_screenshot_after_upload_failure(
+                path,
+                captured_filename,
+                captured_size,
+                |entry| storage.insert_history(entry).map(|_id| ()),
+            );
+        }
+    };
+
+    persist_and_write_upload_result(output, &entry, |entry| {
+        storage.insert_history(entry).map(|_id| ())
     })?;
 
     if !cli.no_copy {
@@ -199,6 +195,55 @@ fn run_headless(cli: &Cli, output: &mut impl std::io::Write) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn persist_and_write_upload_result(
+    output: &mut impl std::io::Write,
+    entry: &HistoryEntry,
+    persist: impl FnOnce(&HistoryEntry) -> Result<()>,
+) -> Result<()> {
+    let history_saved = persist(entry).is_ok();
+    let link_written = writeln!(output, "{}", entry.link).is_ok();
+
+    match (history_saved, link_written) {
+        (true, true) => Ok(()),
+
+        (false, true) => bail!(
+            "upload succeeded and its public link was written, but saving it to history failed; \
+             its deletion capability was not preserved"
+        ),
+
+        (true, false) => bail!(
+            "upload succeeded and was saved to history, but writing its public link failed; \
+             recover it from upload history"
+        ),
+
+        (false, false) => bail!(
+            "upload succeeded, but neither its public link nor its history record could be written; \
+             its deletion capability was not preserved"
+        ),
+    }
+}
+
+fn retain_local_screenshot_after_upload_failure(
+    path: &std::path::Path,
+    filename: String,
+    size_bytes: u64,
+    persist: impl FnOnce(&HistoryEntry) -> Result<()>,
+) -> Result<()> {
+    let entry = HistoryEntry::local(filename, size_bytes, path);
+
+    if persist(&entry).is_ok() {
+        bail!(
+            "upload failed; screenshot saved locally at {} and recorded in upload history",
+            path.display()
+        );
+    }
+
+    bail!(
+        "upload failed; screenshot saved locally at {}, but its local history record could not be saved",
+        path.display()
+    )
 }
 
 fn initialized_upload_target(
@@ -299,8 +344,7 @@ fn capture_headless(config: &AppConfig) -> Result<UploadPayload> {
         config.behavior.resize_quality,
     )
     .context("screenshot capture requires a graphical session")?;
-    let filename_stem =
-        naming::screenshot_stem(&config.capture_naming, config.privacy.private_capture_names)?;
+    let filename_stem = naming::screenshot_stem(&config.capture_naming)?;
 
     payload.filename = sharer::capture::named_capture_filename(&filename_stem, &payload.filename);
     Ok(payload)
@@ -313,8 +357,10 @@ fn capture_headless(_config: &AppConfig) -> Result<UploadPayload> {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
+    use std::io;
+
     use sharer::config::ProviderCredentials;
+    use sharer::upload::UploadReceipt;
 
     use super::*;
 
@@ -344,5 +390,121 @@ mod tests {
                 .credential
                 .is_empty()
         );
+    }
+
+    fn sensitive_entry() -> HistoryEntry {
+        HistoryEntry::from_receipt(
+            UploadReceipt {
+                original_name: "capture.png".to_owned(),
+                size_bytes: 42,
+                link: "https://public.example/capture".to_owned(),
+                delete_url: "SENSITIVE-DELETION-CAPABILITY".to_owned(),
+                expires_at: "soon".to_owned(),
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn history_failure_does_not_expose_deletion_capability() {
+        let mut output = Vec::new();
+        let error = persist_and_write_upload_result(&mut output, &sensitive_entry(), |entry| {
+            Err(anyhow::anyhow!(entry.delete_url.clone()))
+        })
+        .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("deletion capability was not preserved"));
+        assert!(!message.contains("SENSITIVE-DELETION-CAPABILITY"));
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "https://public.example/capture\n"
+        );
+    }
+
+    struct FailingWriter;
+
+    impl io::Write for FailingWriter {
+        fn write(&mut self, _buffer: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("synthetic output failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn output_failure_points_to_history_without_exposing_deletion_capability() {
+        let error = persist_and_write_upload_result(
+            &mut FailingWriter,
+            &sensitive_entry(),
+            |_entry| Ok(()),
+        )
+        .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("recover it from upload history"));
+        assert!(!message.contains("SENSITIVE-DELETION-CAPABILITY"));
+    }
+
+    #[test]
+    fn history_and_output_failure_still_hide_deletion_capability() {
+        let error =
+            persist_and_write_upload_result(&mut FailingWriter, &sensitive_entry(), |entry| {
+                Err(anyhow::anyhow!(entry.delete_url.clone()))
+            })
+            .unwrap_err();
+        let message = format!("{error:#}");
+
+        assert!(message.contains("neither its public link nor its history record"));
+        assert!(!message.contains("SENSITIVE-DELETION-CAPABILITY"));
+    }
+
+    #[test]
+    fn failed_screenshot_upload_retains_local_history_without_error_details() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.png");
+
+        std::fs::write(&path, b"capture").unwrap();
+        let mut persisted = None;
+
+        let error = retain_local_screenshot_after_upload_failure(
+            &path,
+            "capture.png".to_owned(),
+            7,
+            |entry| {
+                persisted = Some(entry.clone());
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        let entry = persisted.unwrap();
+        let message = error.to_string();
+
+        assert_eq!(entry.local_path, path.to_string_lossy());
+        assert!(entry.link.is_empty());
+        assert!(message.contains(path.to_string_lossy().as_ref()));
+        assert!(message.contains("recorded in upload history"));
+        assert!(!message.contains("SENSITIVE-DELETION-CAPABILITY"));
+    }
+
+    #[test]
+    fn failed_screenshot_upload_reports_local_history_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.png");
+
+        let error = retain_local_screenshot_after_upload_failure(
+            &path,
+            "capture.png".to_owned(),
+            7,
+            |_entry| Err(anyhow::anyhow!("SENSITIVE-DELETION-CAPABILITY")),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+
+        assert!(message.contains(path.to_string_lossy().as_ref()));
+        assert!(message.contains("history record could not be saved"));
+        assert!(!message.contains("SENSITIVE-DELETION-CAPABILITY"));
     }
 }

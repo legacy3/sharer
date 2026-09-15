@@ -11,6 +11,48 @@ component SettingsPane inherits ScrollView {
     }
 }
 
+component ShortcutField inherits Rectangle {
+    in property <string> shortcut;
+    in property <bool> recording: false;
+    callback record();
+    property <bool> hovered: touch.has-hover;
+
+    height: Theme.control-height;
+    vertical-stretch: 0;
+    border-radius: Theme.control-radius;
+    border-width: 1px;
+    border-color: root.recording || focus.has-focus ? Theme.primary-bright : Theme.border;
+    background: root.hovered ? Theme.surface-hover : Theme.surface-raised;
+    forward-focus: focus;
+    accessible-role: button;
+    accessible-label: root.recording ? "Press the new shortcut" : (root.shortcut == "" ? "Shortcut disabled" : root.shortcut);
+    accessible-action-default => { root.record(); }
+
+    Text {
+        x: 9px;
+        width: parent.width - 18px;
+        text: root.recording ? "Press shortcut…" : (root.shortcut == "" ? "Disabled" : root.shortcut);
+        color: root.recording ? Theme.primary-bright : (root.shortcut == "" ? Theme.text-muted : Theme.text);
+        font-size: 12px;
+        font-weight: root.recording ? 700 : 600;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+
+    focus := FocusScope {
+        width: 0px;
+        height: 0px;
+        key-pressed(event) => {
+            if event.text == Key.Space || event.text == Key.Return {
+                root.record();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { focus.focus(); root.record(); } }
+}
+
 export component SettingsView inherits Rectangle {
     background: transparent;
 
@@ -25,11 +67,11 @@ export component SettingsView inherits Rectangle {
     in-out property <int> recording-fps;
     in-out property <int> recording-max-seconds;
     in-out property <bool> save-captures;
+    in-out property <bool> auto-upload-captures;
     in-out property <bool> force-sdr-captures;
     in-out property <int> capture-resolution;
     in-out property <int> resize-quality;
     in property <bool> retina-scaling-available;
-    in-out property <bool> private-capture-names;
     in-out property <bool> remove-exif;
     in-out property <string> capture-directory;
     in-out property <bool> minimize-to-tray;
@@ -42,6 +84,7 @@ export component SettingsView inherits Rectangle {
     in-out property <string> capture-custom-name;
     in-out property <bool> require-tor;
     in-out property <bool> completion-sound;
+    in-out property <int> tray-click-action;
     in property <string> hotkey-status;
     in property <string> app-version;
     in property <string> update-status;
@@ -49,6 +92,7 @@ export component SettingsView inherits Rectangle {
     in property <bool> settings-dirty;
 
     in-out property <int> selected-section: 0;
+    in-out property <int> shortcut-recording: 0;
     property <length> label-width: 112px;
     property <length> column-width: (root.width - 46px) / 2;
 
@@ -56,6 +100,15 @@ export component SettingsView inherits Rectangle {
     callback open-capture-folder();
     callback save-settings();
     callback open-update();
+    callback shortcut-recording-started();
+    callback shortcut-recording-finished();
+
+    changed selected-section => {
+        if root.selected-section != 1 && root.shortcut-recording != 0 {
+            root.shortcut-recording = 0;
+            root.shortcut-recording-finished();
+        }
+    }
 
     VerticalLayout {
         spacing: 12px;
@@ -68,7 +121,7 @@ export component SettingsView inherits Rectangle {
                 width: 104px;
                 text: "Save changes";
                 primary: true;
-                enabled: root.settings-dirty;
+                enabled: root.settings-dirty && root.shortcut-recording == 0;
                 clicked => { root.save-settings(); }
             }
         }
@@ -134,20 +187,19 @@ export component SettingsView inherits Rectangle {
             if root.selected-section == 1: SettingsPane {
                     SectionHeading { text: "SCREENSHOTS"; }
                     SectionCard {
-                        height: root.retina-scaling-available ? (root.capture-resolution == 1 ? 168px : 132px) : 96px;
+                        height: root.retina-scaling-available ? (root.capture-resolution == 1 ? 118px : 82px) : 46px;
                         VerticalLayout {
                             padding: 10px; spacing: 6px;
-                            FormRow { label: "File name"; label-width: root.label-width;
-                                CompactSelect { width: 176px; model: ["Active window", "Random ID", "Custom"]; current-index <=> root.capture-name-mode; }
-                                CompactField { text <=> root.capture-custom-name; field-enabled: root.capture-name-mode == 2; placeholder-text: "screenshot"; }
-                            }
                             if root.retina-scaling-available: FormRow { label: "Retina size"; label-width: root.label-width;
                                 CompactSelect { width: 176px; model: ["Native pixels", "Logical size"]; current-index <=> root.capture-resolution; }
                             }
                             if root.retina-scaling-available && root.capture-resolution == 1: FormRow { label: "Resize quality"; label-width: root.label-width;
                                 CompactSelect { width: 176px; model: ["Fast", "Balanced", "Sharp"]; current-index <=> root.resize-quality; }
                             }
-                            CheckBox { text: "Force SDR PNG output"; checked <=> root.force-sdr-captures; }
+                            CheckBox {
+                                text: "Force SDR PNG output"; checked <=> root.force-sdr-captures;
+                                Tooltip { text: @markdown("Always save screenshots as standard PNG files. Leave this off to preserve HDR color on compatible Windows displays."); }
+                            }
                         }
                     }
                     SectionHeading { text: "RECORDING"; }
@@ -159,12 +211,19 @@ export component SettingsView inherits Rectangle {
                             FormRow { width: root.column-width; label: "Frame rate"; label-width: 76px; NumberStepper { width: 80px; value <=> root.recording-fps; minimum: 1; maximum: 60; } FieldLabel { text: "fps"; } }
                         }
                     }
-                    SectionHeading { text: "LOCAL COPIES"; }
+                    SectionHeading { text: "CAPTURE OUTPUT"; }
                     SectionCard {
-                        height: 84px;
+                        height: 120px;
                         VerticalLayout {
                             padding: 9px; spacing: 5px;
-                            CheckBox { text: "Save screenshots and recordings"; checked <=> root.save-captures; }
+                            CheckBox {
+                                text: "Upload screenshots and recordings automatically"; checked <=> root.auto-upload-captures;
+                                Tooltip { text: @markdown("When disabled, captures stay on this computer and are not sent to the configured uploader."); }
+                            }
+                            CheckBox {
+                                text: "Save screenshots and recordings locally"; checked <=> root.save-captures;
+                                Tooltip { text: @markdown("Captures are grouped into year-month folders inside this directory."); }
+                            }
                             HorizontalLayout {
                                 spacing: 6px;
                                 CompactField { text <=> root.capture-directory; field-enabled: root.save-captures; placeholder-text: "Capture folder"; }
@@ -180,19 +239,19 @@ export component SettingsView inherits Rectangle {
                             padding: 10px; spacing: 5px;
                             if root.width >= 640px: HorizontalLayout {
                                 spacing: 12px;
-                                FormRow { width: root.column-width; gap: 8px; label: "Region"; label-width: 80px; CompactField { text <=> root.region-hotkey; } }
-                                FormRow { width: root.column-width; gap: 8px; label: "Recording"; label-width: 80px; CompactField { text <=> root.recording-hotkey; } }
+                                FormRow { width: root.column-width; gap: 8px; label: "Region"; label-width: 80px; ShortcutField { shortcut: root.region-hotkey; recording: root.shortcut-recording == 1; record => { root.shortcut-recording = 1; root.shortcut-recording-started(); } } }
+                                FormRow { width: root.column-width; gap: 8px; label: "Recording"; label-width: 80px; ShortcutField { shortcut: root.recording-hotkey; recording: root.shortcut-recording == 2; record => { root.shortcut-recording = 2; root.shortcut-recording-started(); } } }
                             }
                             if root.width >= 640px: HorizontalLayout {
                                 spacing: 12px;
-                                FormRow { width: root.column-width; gap: 8px; label: "Full screen"; label-width: 80px; CompactField { text <=> root.screen-hotkey; } }
-                                FormRow { width: root.column-width; gap: 8px; label: "Clipboard"; label-width: 80px; CompactField { text <=> root.clipboard-hotkey; } }
+                                FormRow { width: root.column-width; gap: 8px; label: "Full screen"; label-width: 80px; ShortcutField { shortcut: root.screen-hotkey; recording: root.shortcut-recording == 3; record => { root.shortcut-recording = 3; root.shortcut-recording-started(); } } }
+                                FormRow { width: root.column-width; gap: 8px; label: "Clipboard"; label-width: 80px; ShortcutField { shortcut: root.clipboard-hotkey; recording: root.shortcut-recording == 4; record => { root.shortcut-recording = 4; root.shortcut-recording-started(); } } }
                             }
-                            if root.width < 640px: FormRow { gap: 8px; label: "Region"; label-width: root.label-width; CompactField { text <=> root.region-hotkey; } }
-                            if root.width < 640px: FormRow { gap: 8px; label: "Recording"; label-width: root.label-width; CompactField { text <=> root.recording-hotkey; } }
-                            if root.width < 640px: FormRow { gap: 8px; label: "Full screen"; label-width: root.label-width; CompactField { text <=> root.screen-hotkey; } }
-                            if root.width < 640px: FormRow { gap: 8px; label: "Clipboard"; label-width: root.label-width; CompactField { text <=> root.clipboard-hotkey; } }
-                            CaptionText { text: root.hotkey-status; }
+                            if root.width < 640px: FormRow { gap: 8px; label: "Region"; label-width: root.label-width; ShortcutField { shortcut: root.region-hotkey; recording: root.shortcut-recording == 1; record => { root.shortcut-recording = 1; root.shortcut-recording-started(); } } }
+                            if root.width < 640px: FormRow { gap: 8px; label: "Recording"; label-width: root.label-width; ShortcutField { shortcut: root.recording-hotkey; recording: root.shortcut-recording == 2; record => { root.shortcut-recording = 2; root.shortcut-recording-started(); } } }
+                            if root.width < 640px: FormRow { gap: 8px; label: "Full screen"; label-width: root.label-width; ShortcutField { shortcut: root.screen-hotkey; recording: root.shortcut-recording == 3; record => { root.shortcut-recording = 3; root.shortcut-recording-started(); } } }
+                            if root.width < 640px: FormRow { gap: 8px; label: "Clipboard"; label-width: root.label-width; ShortcutField { shortcut: root.clipboard-hotkey; recording: root.shortcut-recording == 4; record => { root.shortcut-recording = 4; root.shortcut-recording-started(); } } }
+                            CaptionText { text: root.shortcut-recording == 0 ? root.hotkey-status : "Press keys · Backspace/Delete disables · Esc cancels"; }
                         }
                     }
             }
@@ -200,12 +259,26 @@ export component SettingsView inherits Rectangle {
             if root.selected-section == 3: SettingsPane {
                     SectionHeading { text: "FILES AND IDENTITY"; }
                     SectionCard {
-                        height: 70px;
+                        height: root.capture-name-mode == 3 ? 116px : 82px;
                         VerticalLayout {
                             padding: 10px; spacing: 5px;
                             CheckBox { text: "Remove EXIF from image uploads"; checked <=> root.remove-exif; }
                             Rectangle { height: 1px; background: Theme.border; }
-                            CheckBox { text: "Use private names for captures"; checked <=> root.private-capture-names; }
+                            FormRow { label: "File name"; label-width: root.label-width;
+                                CompactSelect {
+                                    width: 216px;
+                                    model: ["Active window title", "Random ID (private)", "Adjective-animal-1234", "Custom base name"];
+                                    current-index <=> root.capture-name-mode;
+                                    Tooltip { text: @markdown("**Active window title** uses the focused app or window. **Random ID** is a private 128-bit identifier. **Adjective-animal-1234** creates a readable random name. **Custom base name** uses the text below."); }
+                                }
+                            }
+                            if root.capture-name-mode == 3: FormRow { label: "Custom name"; label-width: root.label-width;
+                                CompactField {
+                                    text <=> root.capture-custom-name;
+                                    placeholder-text: "e.g. project-screenshot";
+                                    Tooltip { text: @markdown("Enter the base filename. ShareR sanitizes characters, adds the file extension, and avoids overwriting an existing capture."); }
+                                }
+                            }
                         }
                     }
                     SectionHeading { text: "NETWORK"; }
@@ -221,7 +294,7 @@ export component SettingsView inherits Rectangle {
             if root.selected-section == 0: SettingsPane {
                     SectionHeading { text: "APP"; }
                     SectionCard {
-                        height: 86px;
+                        height: 126px;
                         VerticalLayout {
                             padding: 10px; spacing: 6px;
                             HorizontalLayout {
@@ -229,6 +302,12 @@ export component SettingsView inherits Rectangle {
                                 CheckBox { text: "Start at login"; checked <=> root.start-at-login; }
                             }
                             CheckBox { text: "Play sound when link is copied"; checked <=> root.completion-sound; }
+                            FormRow { label: "Tray left click"; label-width: root.label-width;
+                                CompactSelect {
+                                    width: 184px; model: ["Capture region", "Show ShareR", "Capture screen", "Record region", "Upload clipboard", "Do nothing"]; current-index <=> root.tray-click-action;
+                                    Tooltip { text: @markdown("Choose what a single left click on the tray icon does. Double click opens ShareR and right click opens the tray menu."); }
+                                }
+                            }
                         }
                     }
                     SectionHeading { text: "ABOUT"; }
@@ -239,7 +318,7 @@ export component SettingsView inherits Rectangle {
                             IconBox { icon-source: root.update-available ? Icons.update : Icons.success; tint: root.update-available ? Theme.primary-bright : Theme.success; icon-size: 17px; box-width: 18px; }
                             VerticalLayout {
                                 alignment: center; spacing: 2px;
-                                Text { text: "ShareR " + root.app-version; color: Theme.text; font-size: 11px; font-weight: 700; }
+                                Text { text: "ShareR " + root.app-version; color: Theme.text; font-size: 13px; font-weight: 700; }
                                 CaptionText { text: root.update-status; Tooltip { text: @markdown("\{parent.text}"); } }
                             }
                             Rectangle { horizontal-stretch: 1; background: transparent; }

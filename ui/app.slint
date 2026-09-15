@@ -10,6 +10,7 @@ export { HistoryRow, RegionWindow }
 
 export component AppWindow inherits Window {
     title: "ShareR";
+    default-font-size: 12px;
     preferred-width: 920px;
     preferred-height: 620px;
     min-width: 760px;
@@ -17,6 +18,8 @@ export component AppWindow inherits Window {
     background: Theme.bg;
 
     in property <image> app-icon: @image-url("../assets/sharer.png");
+    // Changing this property invalidates the transparent full-window repaint layer below.
+    in-out property <int> repaint-sequence: 0;
     in-out property <int> current-page: 0;
     in-out property <int> uploader-kind: 0;
     in-out property <string> uploader-url: "";
@@ -32,11 +35,11 @@ export component AppWindow inherits Window {
     in-out property <int> recording-fps: 30;
     in-out property <int> recording-max-seconds: 300;
     in-out property <bool> save-captures: true;
+    in-out property <bool> auto-upload-captures: false;
     in-out property <bool> force-sdr-captures: false;
     in-out property <int> capture-resolution: 0;
     in-out property <int> resize-quality: 0;
     in property <bool> retina-scaling-available: false;
-    in-out property <bool> private-capture-names: false;
     in-out property <bool> remove-exif: false;
     in-out property <string> capture-directory: "";
     in-out property <bool> minimize-to-tray: true;
@@ -46,19 +49,23 @@ export component AppWindow inherits Window {
     in-out property <string> screen-hotkey: "PrintScreen";
     in-out property <string> clipboard-hotkey: "control+shift+V";
     in-out property <int> capture-name-mode: 0;
-    in-out property <string> capture-custom-name: "screenshot";
+    in-out property <string> capture-custom-name: "";
     in-out property <bool> require-tor: false;
     in-out property <bool> completion-sound: false;
+    in-out property <int> tray-click-action: 0;
     in-out property <string> hotkey-status: "";
     in-out property <string> status-text: "Ready";
     in-out property <string> status-detail: "";
     in-out property <string> last-link: "";
+    in-out property <string> last-local-path: "";
     in-out property <string> last-delete-url: "";
     in-out property <bool> last-delete-saved: false;
     in property <[HistoryRow]> history-rows;
-    in property <string> history-page-label: "Page 1 of 1  -  0 uploads";
+    in property <string> history-page-label: "Page 1 of 1  -  0 items";
     in property <bool> history-has-previous: false;
     in property <bool> history-has-next: false;
+    in-out property <int> history-sort-column: 1;
+    in-out property <bool> history-sort-ascending: false;
     in-out property <bool> recording: false;
     in property <string> app-version: "";
     in-out property <bool> update-available: false;
@@ -68,25 +75,46 @@ export component AppWindow inherits Window {
 
     in-out property <bool> settings-dirty: false;
     in-out property <int> settings-section: 0;
+    in-out property <int> shortcut-recording: 0;
 
     callback capture-region();
     callback record-region();
     callback capture-screen();
     callback upload-clipboard();
     callback choose-file();
+    callback cancel-upload();
     callback choose-capture-folder();
     callback open-capture-folder();
     callback open-link();
     callback copy-last-link();
     callback copy-last-delete();
+    callback open-last-local();
+    callback reveal-last-local();
+    callback copy-last-file();
     callback open-history-link(int);
     callback copy-history-link(int);
     callback copy-history-delete(int);
+    callback open-history-local(int);
+    callback reveal-history-local(int);
+    callback copy-history-file(int);
+    callback copy-history-path(int);
+    callback remove-history-entry(int);
+    callback delete-history-local(int);
     callback history-previous();
     callback history-next();
+    callback history-sort-column-clicked(int);
     callback open-update();
     callback save-settings();
     callback settings-edited();
+    callback shortcut-recording-started();
+    callback shortcut-recording-finished();
+
+    changed current-page => {
+        if root.current-page != 2 && root.shortcut-recording != 0 {
+            root.shortcut-recording = 0;
+            root.shortcut-recording-finished();
+        }
+    }
 
     changed uploader-kind => { root.settings-edited(); }
     changed uploader-url => { root.settings-edited(); }
@@ -99,10 +127,10 @@ export component AppWindow inherits Window {
     changed recording-fps => { root.settings-edited(); }
     changed recording-max-seconds => { root.settings-edited(); }
     changed save-captures => { root.settings-edited(); }
+    changed auto-upload-captures => { root.settings-edited(); }
     changed force-sdr-captures => { root.settings-edited(); }
     changed capture-resolution => { root.settings-edited(); }
     changed resize-quality => { root.settings-edited(); }
-    changed private-capture-names => { root.settings-edited(); }
     changed remove-exif => { root.settings-edited(); }
     changed capture-directory => { root.settings-edited(); }
     changed minimize-to-tray => { root.settings-edited(); }
@@ -115,6 +143,7 @@ export component AppWindow inherits Window {
     changed capture-custom-name => { root.settings-edited(); }
     changed require-tor => { root.settings-edited(); }
     changed completion-sound => { root.settings-edited(); }
+    changed tray-click-action => { root.settings-edited(); }
 
     icon: root.app-icon;
 
@@ -134,7 +163,7 @@ export component AppWindow inherits Window {
                     height: 48px;
                     spacing: 9px;
                     IconBox { icon-source: root.app-icon; tint: transparent; icon-size: 32px; box-width: 32px; }
-                    Text { text: "ShareR"; color: Theme.text; font-size: 16px; font-weight: 750; vertical-alignment: center; }
+                    Text { text: "ShareR"; color: Theme.text; font-size: 18px; font-weight: 700; vertical-alignment: center; }
                 }
 
                 Rectangle { height: 4px; background: transparent; }
@@ -160,6 +189,8 @@ export component AppWindow inherits Window {
                 upload-progress: root.upload-progress;
                 recording: root.recording;
                 configured: root.uploader-kind == 0 ? root.uploader-url != "" : root.uploader-kind == 1 ? root.imgur-credential != "" : root.uploader-kind == 5 ? root.sul-credential != "" : true;
+                capture-enabled: root.save-captures || (root.auto-upload-captures
+                    && (root.uploader-kind == 0 ? root.uploader-url != "" : root.uploader-kind == 1 ? root.imgur-credential != "" : root.uploader-kind == 5 ? root.sul-credential != "" : true));
                 region-hotkey: root.region-hotkey;
                 recording-hotkey: root.recording-hotkey;
                 screen-hotkey: root.screen-hotkey;
@@ -167,6 +198,7 @@ export component AppWindow inherits Window {
                 status-text: root.status-text;
                 status-detail: root.status-detail;
                 last-link: root.last-link;
+                last-local-path: root.last-local-path;
                 last-delete-url: root.last-delete-url;
                 last-delete-saved: root.last-delete-saved;
                 update-available: root.update-available;
@@ -176,9 +208,13 @@ export component AppWindow inherits Window {
                 capture-screen => { root.capture-screen(); }
                 upload-clipboard => { root.upload-clipboard(); }
                 choose-file => { root.choose-file(); }
+                cancel-upload => { root.cancel-upload(); }
                 open-link => { root.open-link(); }
                 copy-link => { root.copy-last-link(); }
                 copy-delete => { root.copy-last-delete(); }
+                open-local => { root.open-last-local(); }
+                reveal-local => { root.reveal-last-local(); }
+                copy-file => { root.copy-last-file(); }
                 open-update => { root.open-update(); }
                 show-settings => {
                     root.settings-section = 2;
@@ -192,11 +228,20 @@ export component AppWindow inherits Window {
                 page-label: root.history-page-label;
                 has-previous: root.history-has-previous;
                 has-next: root.history-has-next;
+                sort-column: root.history-sort-column;
+                sort-ascending: root.history-sort-ascending;
                 open-link(index) => { root.open-history-link(index); }
                 copy-link(index) => { root.copy-history-link(index); }
                 copy-delete-link(index) => { root.copy-history-delete(index); }
+                open-local(index) => { root.open-history-local(index); }
+                reveal-local(index) => { root.reveal-history-local(index); }
+                copy-file(index) => { root.copy-history-file(index); }
+                copy-path(index) => { root.copy-history-path(index); }
+                remove-entry(index) => { root.remove-history-entry(index); }
+                delete-local(index) => { root.delete-history-local(index); }
                 previous-page => { root.history-previous(); }
                 next-page => { root.history-next(); }
+                sort-column-clicked(column) => { root.history-sort-column-clicked(column); }
             }
 
             if root.current-page == 2: SettingsView {
@@ -213,11 +258,11 @@ export component AppWindow inherits Window {
                 recording-fps <=> root.recording-fps;
                 recording-max-seconds <=> root.recording-max-seconds;
                 save-captures <=> root.save-captures;
+                auto-upload-captures <=> root.auto-upload-captures;
                 force-sdr-captures <=> root.force-sdr-captures;
                 capture-resolution <=> root.capture-resolution;
                 resize-quality <=> root.resize-quality;
                 retina-scaling-available: root.retina-scaling-available;
-                private-capture-names <=> root.private-capture-names;
                 remove-exif <=> root.remove-exif;
                 capture-directory <=> root.capture-directory;
                 minimize-to-tray <=> root.minimize-to-tray;
@@ -230,16 +275,26 @@ export component AppWindow inherits Window {
                 capture-custom-name <=> root.capture-custom-name;
                 require-tor <=> root.require-tor;
                 completion-sound <=> root.completion-sound;
+                tray-click-action <=> root.tray-click-action;
                 hotkey-status: root.hotkey-status;
                 app-version: root.app-version;
                 update-status: root.update-status;
                 update-available: root.update-available;
                 settings-dirty: root.settings-dirty;
+                shortcut-recording <=> root.shortcut-recording;
                 choose-capture-folder => { root.choose-capture-folder(); }
                 open-capture-folder => { root.open-capture-folder(); }
                 save-settings => { root.save-settings(); }
                 open-update => { root.open-update(); }
+                shortcut-recording-started => { root.shortcut-recording-started(); }
+                shortcut-recording-finished => { root.shortcut-recording-finished(); }
             }
         }
+    }
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Math.mod(root.repaint-sequence, 2) == 0 ? #00000000 : #ffffff00;
     }
 }

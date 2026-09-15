@@ -2,7 +2,7 @@
 
 use std::{fmt, num::ParseIntError, path::PathBuf, str::FromStr};
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 
 use sharer::{
     MAX_HISTORY_PAGE_SIZE, MAX_LIFETIME_SECONDS, upload::UploaderKind, validate_lifetime,
@@ -19,6 +19,10 @@ pub struct Cli {
     /// Start the desktop app without opening its window (used by login startup).
     #[arg(long, hide = true)]
     pub background: bool,
+
+    /// Desktop renderer: automatic, GPU accelerated, or software fallback.
+    #[arg(long, value_enum, default_value_t)]
+    pub renderer: RendererPreference,
 
     /// File to upload. With no file or action, launch the desktop app.
     #[arg(
@@ -114,6 +118,7 @@ impl fmt::Debug for Cli {
         formatter
             .debug_struct("Cli")
             .field("background", &self.background)
+            .field("renderer", &self.renderer)
             .field("file", &self.file)
             .field("clipboard", &self.clipboard)
             .field("screenshot", &self.screenshot)
@@ -131,6 +136,17 @@ impl fmt::Debug for Cli {
             .field("require_tor", &self.require_tor)
             .finish()
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+pub enum RendererPreference {
+    /// Use `ShareR`'s preferred renderer and honor Slint environment overrides.
+    #[default]
+    Auto,
+    /// Require the platform's preferred GPU renderer.
+    Gpu,
+    /// Use Slint's CPU-only software renderer.
+    Software,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -219,8 +235,6 @@ enum CliHistoryLimitError {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser as _;
-
     use super::*;
 
     #[test]
@@ -296,5 +310,27 @@ mod tests {
 
         assert!(cli.background);
         assert!(!cli.is_headless());
+    }
+
+    #[test]
+    fn renderer_defaults_to_auto() {
+        let cli = Cli::try_parse_from(["sharer"]).unwrap();
+
+        assert_eq!(cli.renderer, RendererPreference::Auto);
+    }
+
+    #[test]
+    fn accepts_software_renderer_recovery_flag() {
+        let cli = Cli::try_parse_from(["sharer", "--renderer", "software"]).unwrap();
+
+        assert_eq!(cli.renderer, RendererPreference::Software);
+        assert!(!cli.is_headless());
+    }
+
+    #[test]
+    fn rejects_unknown_renderer() {
+        let error = Cli::try_parse_from(["sharer", "--renderer", "warp-drive"]).unwrap_err();
+
+        assert!(error.to_string().contains("invalid value 'warp-drive'"));
     }
 }

@@ -9,9 +9,12 @@ use crate::AppWindow;
 use sharer::{
     config::{
         AppConfig, BehaviorConfig, CaptureNameMode, CaptureNamingConfig, CaptureResolution,
-        PrivacyConfig, ProviderCredentials, ResizeQuality, ShortcutConfig,
+        PrivacyConfig, ProviderCredentials, ResizeQuality, ShortcutConfig, TrayClickAction,
     },
-    storage::{default_capture_directory, ensure_capture_directory},
+    storage::{
+        capture_directory_needs_default, capture_directory_or_default, default_capture_directory,
+        ensure_capture_directory,
+    },
     upload::{UploadTarget, UploaderKind},
     validate_lifetime, validate_recording_fps, validate_recording_seconds,
 };
@@ -21,11 +24,11 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
     window.set_recording_fps(config.recording_fps.cast_signed());
     window.set_recording_max_seconds(config.recording_max_seconds.cast_signed());
     window.set_save_captures(config.behavior.save_captures);
+    window.set_auto_upload_captures(config.behavior.auto_upload_captures);
     window.set_force_sdr_captures(config.behavior.force_sdr_captures);
     window.set_capture_resolution(config.behavior.capture_resolution.index());
     window.set_resize_quality(config.behavior.resize_quality.index());
     window.set_retina_scaling_available(cfg!(target_os = "macos"));
-    window.set_private_capture_names(config.privacy.private_capture_names);
     window.set_remove_exif(config.privacy.remove_exif);
     window.set_capture_directory(config.capture_directory.clone().into());
     window.set_uploader_kind(config.uploader_kind.index());
@@ -41,6 +44,7 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
     window.set_capture_custom_name(config.capture_naming.custom_name.clone().into());
     window.set_require_tor(config.privacy.require_tor);
     window.set_completion_sound(config.behavior.completion_sound);
+    window.set_tray_click_action(config.behavior.tray_click_action.index());
     window.set_region_hotkey(config.shortcuts.region.clone().into());
     window.set_recording_hotkey(config.shortcuts.recording.clone().into());
     window.set_screen_hotkey(config.shortcuts.screen.clone().into());
@@ -48,10 +52,13 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
     window.set_app_version(env!("CARGO_PKG_VERSION").into());
     window.set_settings_dirty(false);
 
-    if config.upload_target().validate().is_err() {
+    if !config.behavior.auto_upload_captures {
+        window.set_status_text("Ready".into());
+        window.set_status_detail("Captures are saved locally and are not uploaded".into());
+    } else if config.upload_target().validate().is_err() {
         window.set_current_page(2);
         window.set_status_text("Setup required".into());
-        window.set_status_detail("Choose and configure an uploader in Settings to begin".into());
+        window.set_status_detail("Configure an uploader or disable automatic uploads".into());
     } else {
         window.set_status_text("Ready".into());
         window.set_status_detail(
@@ -128,6 +135,7 @@ fn capture_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
     window.get_recording_fps() != saved.recording_fps.cast_signed()
         || window.get_recording_max_seconds() != saved.recording_max_seconds.cast_signed()
         || window.get_save_captures() != saved.behavior.save_captures
+        || window.get_auto_upload_captures() != saved.behavior.auto_upload_captures
         || window.get_force_sdr_captures() != saved.behavior.force_sdr_captures
         || window.get_capture_resolution() != saved.behavior.capture_resolution.index()
         || window.get_resize_quality() != saved.behavior.resize_quality.index()
@@ -137,8 +145,7 @@ fn capture_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
 }
 
 fn privacy_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
-    window.get_private_capture_names() != saved.privacy.private_capture_names
-        || window.get_remove_exif() != saved.privacy.remove_exif
+    window.get_remove_exif() != saved.privacy.remove_exif
         || window.get_require_tor() != saved.privacy.require_tor
 }
 
@@ -146,6 +153,7 @@ fn general_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
     window.get_minimize_to_tray() != saved.behavior.minimize_to_tray
         || window.get_start_at_login() != saved.behavior.start_at_login
         || window.get_completion_sound() != saved.behavior.completion_sound
+        || window.get_tray_click_action() != saved.behavior.tray_click_action.index()
         || window.get_region_hotkey().as_str() != saved.shortcuts.region
         || window.get_recording_hotkey().as_str() != saved.shortcuts.recording
         || window.get_screen_hotkey().as_str() != saved.shortcuts.screen
@@ -157,12 +165,12 @@ pub(crate) fn config_from_window(window: &AppWindow) -> Result<AppConfig> {
         .context("lifetime must be a positive number")?;
 
     validate_lifetime(lifetime_seconds)?;
-    let uploader = upload_target_from_window(window)?;
+    let uploader = upload_target_values_from_window(window)?;
     let shortcuts = ShortcutConfig {
-        region: window.get_region_hotkey().to_string(),
-        recording: window.get_recording_hotkey().to_string(),
-        screen: window.get_screen_hotkey().to_string(),
-        clipboard: window.get_clipboard_hotkey().to_string(),
+        region: window.get_region_hotkey().trim().to_owned(),
+        recording: window.get_recording_hotkey().trim().to_owned(),
+        screen: window.get_screen_hotkey().trim().to_owned(),
+        clipboard: window.get_clipboard_hotkey().trim().to_owned(),
     };
 
     crate::hotkeys::validate_shortcuts(&shortcuts)?;
@@ -172,12 +180,22 @@ pub(crate) fn config_from_window(window: &AppWindow) -> Result<AppConfig> {
     let resize_quality =
         ResizeQuality::from_index(window.get_resize_quality()).context("invalid resize quality")?;
     let save_captures = window.get_save_captures();
-    let capture_directory = window.get_capture_directory().trim().to_owned();
+    let auto_upload_captures = window.get_auto_upload_captures();
+    let capture_directory = capture_directory_or_default(window.get_capture_directory().as_str())?
+        .to_string_lossy()
+        .into_owned();
 
     anyhow::ensure!(
-        !save_captures || !capture_directory.is_empty(),
-        "capture directory cannot be empty while local copies are enabled"
+        save_captures || auto_upload_captures,
+        "enable local capture copies or automatic capture uploads"
     );
+
+    if auto_upload_captures {
+        uploader.validate()?;
+    }
+
+    let tray_click_action = TrayClickAction::from_index(window.get_tray_click_action())
+        .context("invalid tray click action")?;
 
     Ok(AppConfig {
         uploader_kind: uploader.kind,
@@ -197,22 +215,31 @@ pub(crate) fn config_from_window(window: &AppWindow) -> Result<AppConfig> {
         shortcuts,
         behavior: BehaviorConfig {
             save_captures,
+            auto_upload_captures,
             force_sdr_captures: window.get_force_sdr_captures(),
             capture_resolution,
             resize_quality,
             minimize_to_tray: window.get_minimize_to_tray(),
             start_at_login: window.get_start_at_login(),
             completion_sound: window.get_completion_sound(),
+            tray_click_action,
         },
         privacy: PrivacyConfig {
             require_tor: window.get_require_tor(),
-            private_capture_names: window.get_private_capture_names(),
+            private_capture_names: false,
             remove_exif: window.get_remove_exif(),
         },
     })
 }
 
 pub(crate) fn upload_target_from_window(window: &AppWindow) -> Result<UploadTarget> {
+    let target = upload_target_values_from_window(window)?;
+
+    target.validate()?;
+    Ok(target)
+}
+
+fn upload_target_values_from_window(window: &AppWindow) -> Result<UploadTarget> {
     let kind = UploaderKind::from_index(window.get_uploader_kind())
         .context("invalid uploader provider")?;
     let target = UploadTarget {
@@ -230,7 +257,6 @@ pub(crate) fn upload_target_from_window(window: &AppWindow) -> Result<UploadTarg
         header_value: window.get_upload_header_value().to_string(),
     };
 
-    target.validate()?;
     Ok(target)
 }
 
@@ -264,19 +290,18 @@ pub(crate) fn validated_recording_seconds(window: &AppWindow) -> Result<u32> {
     Ok(seconds)
 }
 
-pub(crate) fn configured_capture_directory(window: &AppWindow) -> Option<PathBuf> {
-    window
-        .get_save_captures()
-        .then(|| PathBuf::from(window.get_capture_directory().as_str()))
+pub(crate) fn configured_capture_directory(window: &AppWindow) -> Result<Option<PathBuf>> {
+    if window.get_save_captures() {
+        Ok(Some(capture_directory_or_default(
+            window.get_capture_directory().as_str(),
+        )?))
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn open_capture_folder(window: &AppWindow) -> Result<()> {
-    let directory = PathBuf::from(window.get_capture_directory().as_str());
-
-    anyhow::ensure!(
-        !directory.as_os_str().is_empty(),
-        "choose a local capture directory first"
-    );
+    let directory = capture_directory_or_default(window.get_capture_directory().as_str())?;
 
     ensure_capture_directory(&directory)?;
     open::that(&directory).context("failed to open local capture directory")?;
@@ -285,7 +310,7 @@ pub(crate) fn open_capture_folder(window: &AppWindow) -> Result<()> {
 }
 
 pub(crate) fn ensure_default_capture_directory(config: &mut AppConfig) -> Result<()> {
-    if config.capture_directory.trim().is_empty() {
+    if capture_directory_needs_default(&config.capture_directory) {
         config.capture_directory = default_capture_directory()?.to_string_lossy().into_owned();
     }
 

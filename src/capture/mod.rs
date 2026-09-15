@@ -66,7 +66,12 @@ pub enum CaptureColorMode {
     Sdr,
 }
 
-/// A desktop frame retained for interactive region selection.
+// Captured previews are cloned once into Slint. Keeping the source previews to 4 MiB therefore
+// bounds the selector's two owned RGBA copies to 8 MiB across every attached display.
+const SELECTOR_SOURCE_PREVIEW_BUDGET_BYTES: u64 = 4 * 1024 * 1024;
+const RGBA8_BYTES_PER_PIXEL: u64 = 4;
+
+/// A bounded desktop preview retained for interactive region selection.
 #[derive(Debug)]
 pub struct CapturedScreen {
     preview: RgbaImage,
@@ -75,12 +80,25 @@ pub struct CapturedScreen {
     #[cfg(windows)]
     color_mode: CaptureColorMode,
     #[cfg(windows)]
-    hdr_frame: windows_hdr::HdrFrame,
+    device_name: String,
+}
+
+/// A lightweight recipe for recapturing the chosen display after selection.
+#[derive(Clone, Debug)]
+pub struct SelectedRegionCapture {
+    desktop_bounds: DesktopBounds,
+    desktop_region: DesktopRegion,
+    snapped_window: Option<DesktopBounds>,
+    #[cfg(windows)]
+    color_mode: CaptureColorMode,
+    #[cfg(windows)]
+    device_name: String,
 }
 
 #[derive(Debug)]
 pub(super) struct WindowRegion {
     bounds: [f32; 4],
+    desktop_bounds: DesktopBounds,
     title: String,
 }
 
@@ -97,24 +115,10 @@ impl CapturedScreen {
         (self.desktop_bounds.width, self.desktop_bounds.height)
     }
 
-    /// Build a smaller selector-only preview when display pixels exceed logical points.
+    /// Return the physical desktop origin used to place the selector window.
     #[must_use]
-    pub fn scaled_selector_preview(&self) -> Option<RgbaImage> {
-        let (width, height) = self.selector_dimensions();
-        let source_area = u64::from(self.preview.width()) * u64::from(self.preview.height());
-        let selector_area = u64::from(width) * u64::from(height);
-
-        (width > 0 && height > 0 && selector_area < source_area)
-            .then(|| imageops::resize(&self.preview, width, height, imageops::FilterType::Triangle))
-    }
-
-    /// Release the Windows capture representation that the selected output mode cannot use.
-    pub fn release_redundant_buffers(&mut self) {
-        #[cfg(windows)]
-        match self.color_mode {
-            CaptureColorMode::Automatic => self.preview = RgbaImage::new(0, 0),
-            CaptureColorMode::Sdr => self.hdr_frame.release_pixels(),
-        }
+    pub const fn selector_position(&self) -> (i32, i32) {
+        (self.desktop_bounds.x, self.desktop_bounds.y)
     }
 
     /// Return the topmost visible window rectangle under a normalized point.
@@ -123,20 +127,24 @@ impl CapturedScreen {
         window_region_at(&self.window_regions, point)
     }
 
+    /// Return the topmost visible window rectangle and title under a normalized point.
+    #[must_use]
+    pub fn window_target_at(&self, point: [f32; 2]) -> Option<([f32; 4], &str)> {
+        window_target_at(&self.window_regions, point)
+            .map(|window| (window.bounds, window.title.as_str()))
+    }
+
+    /// Return the topmost visible window, or the whole display when no window is hit.
+    #[must_use]
+    pub fn selection_region_at(&self, point: [f32; 2]) -> [f32; 4] {
+        selection_region_at(&self.window_regions, point)
+    }
+
     /// Return the title of a snapped window selection.
     #[must_use]
     pub fn window_title_for_region(&self, selected: NormalizedRegion) -> Option<&str> {
-        const TOLERANCE: f32 = 0.000_1;
-
-        self.window_regions.iter().find_map(|window| {
-            let bounds = window.bounds;
-            let matches = (bounds[0] - selected.x).abs() < TOLERANCE
-                && (bounds[1] - selected.y).abs() < TOLERANCE
-                && (bounds[2] - selected.width).abs() < TOLERANCE
-                && (bounds[3] - selected.height).abs() < TOLERANCE;
-
-            matches.then_some(window.title.as_str())
-        })
+        self.snapped_window(selected)
+            .map(|window| window.title.as_str())
     }
 
     /// Convert a normalized selection into logical desktop coordinates.
@@ -145,6 +153,10 @@ impl CapturedScreen {
     ///
     /// Returns an error when the selected rectangle is empty.
     pub fn desktop_region(&self, region: NormalizedRegion) -> Result<DesktopRegion> {
+        if let Some(window) = self.snapped_window(region) {
+            return Ok(DesktopRegion::from_bounds(window.desktop_bounds));
+        }
+
         let bounds = normalized_desktop_bounds(self.desktop_bounds, region)?;
 
         Ok(DesktopRegion {
@@ -153,6 +165,72 @@ impl CapturedScreen {
             width: bounds.width,
             height: bounds.height,
         })
+    }
+
+    /// Prepare a small, sendable recipe for a one-shot recapture after selector windows close.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the selected rectangle is empty.
+    pub fn selected_region_capture(
+        &self,
+        region: NormalizedRegion,
+    ) -> Result<SelectedRegionCapture> {
+        let snapped_window = self
+            .snapped_window(region)
+            .map(|window| window.desktop_bounds);
+
+        Ok(SelectedRegionCapture {
+            desktop_bounds: self.desktop_bounds,
+            desktop_region: self.desktop_region(region)?,
+            snapped_window,
+            #[cfg(windows)]
+            color_mode: self.color_mode,
+            #[cfg(windows)]
+            device_name: self.device_name.clone(),
+        })
+    }
+
+    fn snapped_window(&self, selected: NormalizedRegion) -> Option<&WindowRegion> {
+        const TOLERANCE: f32 = 0.000_1;
+
+        self.window_regions.iter().find(|window| {
+            let bounds = window.bounds;
+
+            (bounds[0] - selected.x).abs() < TOLERANCE
+                && (bounds[1] - selected.y).abs() < TOLERANCE
+                && (bounds[2] - selected.width).abs() < TOLERANCE
+                && (bounds[3] - selected.height).abs() < TOLERANCE
+        })
+    }
+}
+
+impl SelectedRegionCapture {
+    fn crop_bounds(&self, image_width: u32, image_height: u32) -> Result<CropBounds> {
+        if let Some(window) = self.snapped_window {
+            return exact_window_bounds(self.desktop_bounds, window, image_width, image_height);
+        }
+
+        let relative_x = self.desktop_region.x.saturating_sub(self.desktop_bounds.x);
+        let relative_y = self.desktop_region.y.saturating_sub(self.desktop_bounds.y);
+        let logical = DesktopBounds {
+            x: relative_x,
+            y: relative_y,
+            width: self.desktop_region.width,
+            height: self.desktop_region.height,
+        };
+
+        exact_window_bounds(
+            DesktopBounds {
+                x: 0,
+                y: 0,
+                width: self.desktop_bounds.width,
+                height: self.desktop_bounds.height,
+            },
+            logical,
+            image_width,
+            image_height,
+        )
     }
 }
 
@@ -239,6 +317,15 @@ impl RegionCapturer {
 }
 
 impl DesktopRegion {
+    const fn from_bounds(bounds: DesktopBounds) -> Self {
+        Self {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        }
+    }
+
     /// Return the left edge in virtual-desktop coordinates.
     #[must_use]
     pub const fn x(self) -> i32 {
@@ -306,7 +393,7 @@ pub fn primary_monitor(
         let _ = capture_resolution;
         let _ = resize_quality;
 
-        return windows_hdr::capture_primary(color_mode);
+        windows_hdr::capture_primary(color_mode)
     }
 
     #[cfg(target_os = "macos")]
@@ -342,24 +429,29 @@ pub fn ensure_recording_supported() -> Result<()> {
     Ok(())
 }
 
-/// Capture the primary display for interactive region selection.
+/// Capture every display for interactive region selection.
 ///
 /// # Errors
 ///
 /// Returns an error when a display is unavailable or capture fails.
-pub fn capture_region_source(
+pub fn capture_region_sources(
     color_mode: CaptureColorMode,
     capture_resolution: CaptureResolution,
-) -> Result<CapturedScreen> {
+) -> Result<Vec<CapturedScreen>> {
     #[cfg(target_os = "macos")]
-    return macos::capture_region_source(color_mode, capture_resolution);
+    return macos::capture_region_source(
+        color_mode,
+        capture_resolution,
+        selector_preview_pixel_budget(1),
+    )
+    .map(|screen| vec![screen]);
 
     #[cfg(not(target_os = "macos"))]
-    let monitor = primary_monitor_handle()?;
+    let monitors = xcap::Monitor::all().context("failed to enumerate displays")?;
     #[cfg(not(target_os = "macos"))]
-    let desktop_bounds = monitor_bounds(&monitor)?;
+    let windows = xcap::Window::all().context("failed to enumerate capturable windows")?;
     #[cfg(not(target_os = "macos"))]
-    let window_regions = visible_window_regions(desktop_bounds);
+    let preview_pixel_budget = selector_preview_pixel_budget(monitors.len());
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
     let _ = color_mode;
@@ -368,29 +460,172 @@ pub fn capture_region_source(
 
     #[cfg(windows)]
     {
-        let hdr_frame = windows_hdr::capture_frame()?;
-        let preview = windows_hdr::sdr_image(&hdr_frame)?;
+        // Capture displays serially as RGBA8. A full native frame is transient and is reduced to
+        // its budgeted selector preview before the next display is captured. HDR capture is
+        // deferred until the chosen display and output bounds are known.
+        let screens = monitors
+            .into_iter()
+            .map(|monitor| {
+                let device_name = monitor.name().context("failed to read display name")?;
+                let desktop_bounds = monitor_bounds(&monitor)?;
+                let window_regions = visible_window_regions(&windows, desktop_bounds);
+                let preview = monitor
+                    .capture_image()
+                    .context("failed to capture display preview")?;
+                let preview = bounded_selector_preview(preview, preview_pixel_budget);
 
-        return Ok(CapturedScreen {
-            preview,
-            desktop_bounds,
-            window_regions,
-            color_mode,
-            hdr_frame,
-        });
+                Ok(CapturedScreen {
+                    preview,
+                    desktop_bounds,
+                    window_regions,
+                    color_mode,
+                    device_name,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        anyhow::ensure!(!screens.is_empty(), "failed to find a display");
+        Ok(screens)
     }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    let preview = monitor
-        .capture_image()
-        .context("failed to capture the primary display")?;
+    {
+        let screens = monitors
+            .into_iter()
+            .map(|monitor| {
+                let desktop_bounds = monitor_bounds(&monitor)?;
+                let window_regions = visible_window_regions(&windows, desktop_bounds);
+                let preview = monitor
+                    .capture_image()
+                    .context("failed to capture display")?;
+                let preview = bounded_selector_preview(preview, preview_pixel_budget);
+
+                Ok(CapturedScreen {
+                    preview,
+                    desktop_bounds,
+                    window_regions,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        anyhow::ensure!(!screens.is_empty(), "failed to find a display");
+        Ok(screens)
+    }
+}
+
+/// Recapture the chosen display and encode the region selected from a bounded preview.
+///
+/// The selector components must be released before this function runs.
+/// This keeps selector and native capture buffers in separate memory phases.
+/// The output reflects the desktop at click time rather than the earlier selector preview.
+///
+/// # Errors
+///
+/// Returns an error if the selected display is unavailable or capture/encoding fails.
+pub fn capture_selected_region(
+    selection: &SelectedRegionCapture,
+    capture_resolution: CaptureResolution,
+    resize_quality: ResizeQuality,
+) -> Result<UploadPayload> {
+    #[cfg(windows)]
+    {
+        let _ = capture_resolution;
+        let _ = resize_quality;
+
+        if selection.color_mode == CaptureColorMode::Sdr {
+            return capture_selected_sdr(selection);
+        }
+
+        let monitor = windows_capture::monitor::Monitor::enumerate()
+            .context("failed to enumerate Windows displays")?
+            .into_iter()
+            .find(|monitor| {
+                monitor.device_name().ok().as_deref() == Some(selection.device_name.as_str())
+            })
+            .with_context(|| {
+                format!("selected display {} is unavailable", selection.device_name)
+            })?;
+        let frame = windows_hdr::capture_frame(monitor)?;
+        let bounds = selection.crop_bounds(frame.width, frame.height)?;
+
+        windows_hdr::encode_region(frame, bounds)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::capture_selected_region(selection.desktop_region, capture_resolution, resize_quality)
+    }
 
     #[cfg(all(not(windows), not(target_os = "macos")))]
-    Ok(CapturedScreen {
-        preview,
-        desktop_bounds,
-        window_regions,
-    })
+    {
+        let _ = capture_resolution;
+        let _ = resize_quality;
+
+        capture_selected_sdr(selection)
+    }
+}
+
+const fn selector_preview_pixel_budget(display_count: usize) -> u64 {
+    let displays = if display_count == 0 {
+        1
+    } else {
+        display_count as u64
+    };
+
+    SELECTOR_SOURCE_PREVIEW_BUDGET_BYTES / RGBA8_BYTES_PER_PIXEL / displays
+}
+
+fn bounded_selector_dimensions(width: u32, height: u32, max_pixels: u64) -> (u32, u32) {
+    let source_pixels = u64::from(width) * u64::from(height);
+
+    if width == 0 || height == 0 || source_pixels <= max_pixels {
+        return (width, height);
+    }
+
+    let scale = (max_pixels.to_f64().unwrap_or(1.0) / source_pixels.to_f64().unwrap_or(1.0)).sqrt();
+    let mut target_width = (width.to_f64().unwrap_or(1.0) * scale)
+        .floor()
+        .to_u32()
+        .unwrap_or(1)
+        .max(1);
+    let target_height = (height.to_f64().unwrap_or(1.0) * scale)
+        .floor()
+        .to_u32()
+        .unwrap_or(1)
+        .max(1);
+
+    while u64::from(target_width) * u64::from(target_height) > max_pixels {
+        target_width = target_width.saturating_sub(1).max(1);
+    }
+
+    (target_width, target_height)
+}
+
+fn bounded_selector_preview(image: RgbaImage, max_pixels: u64) -> RgbaImage {
+    let dimensions = bounded_selector_dimensions(image.width(), image.height(), max_pixels);
+
+    if image.dimensions() == dimensions {
+        image
+    } else {
+        imageops::thumbnail(&image, dimensions.0, dimensions.1)
+    }
+}
+
+#[cfg(test)]
+const fn selector_owned_bytes(preview_pixels: u64) -> u64 {
+    // One capture-module RGBA preview plus one Slint SharedPixelBuffer clone.
+    preview_pixels * RGBA8_BYTES_PER_PIXEL * 2
+}
+
+#[cfg(not(target_os = "macos"))]
+fn capture_selected_sdr(selection: &SelectedRegionCapture) -> Result<UploadPayload> {
+    let capturer = RegionCapturer::new(selection.desktop_region, CaptureResolution::Native)?;
+    let (width, height) = capturer.dimensions();
+    let pixels = capturer.capture_rgba()?;
+    let image = RgbaImage::from_raw(width, height, pixels)
+        .context("capture backend returned invalid region dimensions")?;
+
+    encode_sdr_png(image, "region.png")
 }
 
 /// Crop a normalized selection and encode it as PNG.
@@ -404,70 +639,6 @@ pub fn crop_region(image: &RgbaImage, region: NormalizedRegion) -> Result<Upload
         imageops::crop_imm(image, bounds.x, bounds.y, bounds.width, bounds.height).to_image();
 
     encode_sdr_png(cropped, "region.png")
-}
-
-/// Crop an interactive region, preserving automatically detected Windows HDR.
-///
-/// # Errors
-///
-/// Returns an error if the selection is empty or encoding fails.
-pub fn crop_captured_region(
-    screen: &CapturedScreen,
-    region: NormalizedRegion,
-    capture_resolution: CaptureResolution,
-    resize_quality: ResizeQuality,
-) -> Result<UploadPayload> {
-    #[cfg(windows)]
-    {
-        let _ = capture_resolution;
-        let _ = resize_quality;
-        let bounds =
-            normalized_bounds_dimensions(screen.hdr_frame.width, screen.hdr_frame.height, region)?;
-
-        return match screen.color_mode {
-            CaptureColorMode::Automatic => windows_hdr::encode_region(&screen.hdr_frame, bounds),
-
-            CaptureColorMode::Sdr => {
-                let cropped = imageops::crop_imm(
-                    screen.preview(),
-                    bounds.x,
-                    bounds.y,
-                    bounds.width,
-                    bounds.height,
-                )
-                .to_image();
-
-                encode_sdr_png(cropped, "region.png")
-            }
-        };
-    }
-
-    #[cfg(not(windows))]
-    {
-        let bounds = normalized_bounds(screen.preview(), region)?;
-        let cropped = imageops::crop_imm(
-            screen.preview(),
-            bounds.x,
-            bounds.y,
-            bounds.width,
-            bounds.height,
-        )
-        .to_image();
-
-        #[cfg(target_os = "macos")]
-        let cropped = if capture_resolution == CaptureResolution::Logical {
-            let logical = screen.desktop_region(region)?;
-
-            resize_rgba(&cropped, logical.width(), logical.height(), resize_quality)
-        } else {
-            cropped
-        };
-
-        #[cfg(not(target_os = "macos"))]
-        let _ = (capture_resolution, resize_quality);
-
-        encode_sdr_png(cropped, "region.png")
-    }
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -489,7 +660,7 @@ struct CropBounds {
     height: u32,
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn primary_monitor_handle() -> Result<xcap::Monitor> {
     let monitors = xcap::Monitor::all().context("failed to enumerate displays")?;
 
@@ -544,7 +715,10 @@ pub(super) fn intersect_bounds(left: DesktopBounds, right: DesktopBounds) -> Opt
 }
 
 #[cfg(not(target_os = "macos"))]
-fn visible_window_regions(desktop_bounds: DesktopBounds) -> Vec<WindowRegion> {
+fn visible_window_regions(
+    windows: &[xcap::Window],
+    desktop_bounds: DesktopBounds,
+) -> Vec<WindowRegion> {
     let Some(desktop_width) = desktop_bounds.width.to_f32() else {
         return Vec::new();
     };
@@ -552,19 +726,16 @@ fn visible_window_regions(desktop_bounds: DesktopBounds) -> Vec<WindowRegion> {
         return Vec::new();
     };
 
-    xcap::Window::all()
-        .unwrap_or_default()
-        .into_iter()
+    windows
+        .iter()
         .filter_map(|window| {
             let title = window.title().ok()?;
 
-            (!window.is_minimized().unwrap_or(true)
-                && !title.is_empty()
-                && !title.eq_ignore_ascii_case("ShareR"))
-            .then_some((window, title))
+            (!window.is_minimized().unwrap_or(true) && is_snap_candidate(window, &title))
+                .then_some((window, title))
         })
         .filter_map(|(window, title)| {
-            intersect_bounds(window_bounds(&window).ok()?, desktop_bounds)
+            intersect_bounds(window_bounds(window).ok()?, desktop_bounds)
                 .map(|bounds| (bounds, title))
         })
         .filter_map(|(bounds, title)| {
@@ -575,19 +746,91 @@ fn visible_window_regions(desktop_bounds: DesktopBounds) -> Vec<WindowRegion> {
 
             (width > 0.02 && height > 0.02).then_some(WindowRegion {
                 bounds: [x, y, width, height],
+                desktop_bounds: bounds,
                 title,
             })
         })
         .collect()
 }
 
+#[cfg(not(target_os = "macos"))]
+fn is_snap_candidate(window: &xcap::Window, title: &str) -> bool {
+    is_snap_candidate_title(title) && !is_native_overlay(window)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_snap_candidate_title(title: &str) -> bool {
+    const NVIDIA_OVERLAY_TITLE: &str = "NVIDIA GeForce Overlay";
+    let is_nvidia_overlay = title
+        .get(..NVIDIA_OVERLAY_TITLE.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(NVIDIA_OVERLAY_TITLE));
+
+    !title.is_empty() && !title.eq_ignore_ascii_case("ShareR") && !is_nvidia_overlay
+}
+
+#[cfg(windows)]
+#[expect(
+    unsafe_code,
+    reason = "Windows exposes window styles and class names through raw HWND queries"
+)]
+fn is_native_overlay(window: &xcap::Window) -> bool {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GWL_EXSTYLE, GetClassNameW, GetWindowLongPtrW, WINDOW_EX_STYLE},
+    };
+
+    let Ok(id) = window.id() else {
+        return false;
+    };
+    let hwnd = HWND(id as usize as *mut std::ffi::c_void);
+    // SAFETY: `id` is the HWND supplied by xcap. Both APIs only read metadata for that handle,
+    // and the class-name buffer is initialized and bounded.
+    let style_bytes = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) }.to_ne_bytes();
+    let style = WINDOW_EX_STYLE(u32::from_ne_bytes(
+        style_bytes[..std::mem::size_of::<u32>()]
+            .try_into()
+            .unwrap_or_default(),
+    ));
+    let mut class_name = [0_u16; 256];
+    // SAFETY: `id` is a live HWND supplied by xcap, and the initialized buffer is bounded.
+    let raw_class_name_len = unsafe { GetClassNameW(hwnd, &mut class_name) };
+    let class_name_len = usize::try_from(raw_class_name_len).unwrap_or_default();
+    let class_name = String::from_utf16_lossy(&class_name[..class_name_len]);
+
+    is_overlay_style(style) || is_ignored_overlay_class(&class_name)
+}
+
+#[cfg(windows)]
+fn is_overlay_style(style: windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW};
+
+    style.contains(WS_EX_TOOLWINDOW) && style.contains(WS_EX_NOACTIVATE)
+}
+
+#[cfg(windows)]
+fn is_ignored_overlay_class(class_name: &str) -> bool {
+    class_name.eq_ignore_ascii_case("CEF-OSC-WIDGET")
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const fn is_native_overlay(_window: &xcap::Window) -> bool {
+    false
+}
+
 fn window_region_at(windows: &[WindowRegion], point: [f32; 2]) -> Option<[f32; 4]> {
-    windows.iter().find_map(|window| {
+    window_target_at(windows, point).map(|window| window.bounds)
+}
+
+fn window_target_at(windows: &[WindowRegion], point: [f32; 2]) -> Option<&WindowRegion> {
+    windows.iter().find(|window| {
         let [x, y, width, height] = window.bounds;
 
-        (point[0] >= x && point[0] <= x + width && point[1] >= y && point[1] <= y + height)
-            .then_some(window.bounds)
+        point[0] >= x && point[0] <= x + width && point[1] >= y && point[1] <= y + height
     })
+}
+
+fn selection_region_at(windows: &[WindowRegion], point: [f32; 2]) -> [f32; 4] {
+    window_region_at(windows, point).unwrap_or([0.0, 0.0, 1.0, 1.0])
 }
 
 fn normalized_desktop_bounds(
@@ -631,6 +874,52 @@ fn normalized_desktop_bounds(
         width,
         height,
     })
+}
+
+fn exact_window_bounds(
+    desktop: DesktopBounds,
+    window: DesktopBounds,
+    image_width: u32,
+    image_height: u32,
+) -> Result<CropBounds> {
+    let relative_x = u32::try_from(window.x.saturating_sub(desktop.x))
+        .context("window starts outside the captured display")?;
+    let relative_y = u32::try_from(window.y.saturating_sub(desktop.y))
+        .context("window starts outside the captured display")?;
+    let x = scale_coordinate(relative_x, desktop.width, image_width)?;
+    let y = scale_coordinate(relative_y, desktop.height, image_height)?;
+    let right = scale_coordinate(
+        relative_x.saturating_add(window.width),
+        desktop.width,
+        image_width,
+    )?;
+    let bottom = scale_coordinate(
+        relative_y.saturating_add(window.height),
+        desktop.height,
+        image_height,
+    )?;
+    let width = right.saturating_sub(x).min(image_width.saturating_sub(x));
+    let height = bottom.saturating_sub(y).min(image_height.saturating_sub(y));
+
+    anyhow::ensure!(width > 0 && height > 0, "selected window region is empty");
+
+    Ok(CropBounds {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn scale_coordinate(value: u32, source_extent: u32, target_extent: u32) -> Result<u32> {
+    anyhow::ensure!(source_extent > 0, "captured display has an empty extent");
+
+    let scaled = (u64::from(value) * u64::from(target_extent) + u64::from(source_extent) / 2)
+        / u64::from(source_extent);
+
+    u32::try_from(scaled)
+        .context("scaled window coordinate is too large")
+        .map(|coordinate| coordinate.min(target_extent))
 }
 
 fn normalized_bounds(image: &RgbaImage, region: NormalizedRegion) -> Result<CropBounds> {
@@ -688,156 +977,8 @@ fn encode_sdr_png(image: RgbaImage, filename: &str) -> Result<UploadPayload> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn every_resize_quality_produces_the_requested_dimensions() {
-        let image = RgbaImage::from_fn(7, 5, |x, y| {
-            image::Rgba([
-                u8::try_from(x * 31).unwrap(),
-                u8::try_from(y * 47).unwrap(),
-                u8::try_from((x + y) * 19).unwrap(),
-                255,
-            ])
-        });
-
-        for quality in [
-            ResizeQuality::Fast,
-            ResizeQuality::Balanced,
-            ResizeQuality::Sharp,
-        ] {
-            let resized = resize_rgba(&image, 3, 2, quality);
-
-            assert_eq!(resized.dimensions(), (3, 2));
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn selector_preview_uses_logical_desktop_dimensions() {
-        let screen = CapturedScreen {
-            preview: RgbaImage::new(8, 4),
-            desktop_bounds: DesktopBounds {
-                x: 0,
-                y: 0,
-                width: 4,
-                height: 2,
-            },
-            window_regions: Vec::new(),
-        };
-        let preview = screen.scaled_selector_preview().unwrap();
-
-        assert_eq!(preview.dimensions(), (4, 2));
-    }
-
-    mod regions {
-        use super::*;
-
-        #[test]
-        fn normalized_region_is_cropped_to_expected_dimensions() {
-            let image = RgbaImage::new(200, 100);
-            let region = NormalizedRegion::new([0.25, 0.2, 0.5, 0.4]);
-            let payload = crop_region(&image, region).unwrap();
-            let decoded = image::load_from_memory(payload.bytes().unwrap()).unwrap();
-
-            assert_eq!((decoded.width(), decoded.height()), (100, 40));
-            assert_eq!(payload.filename, "region.png");
-        }
-
-        #[test]
-        fn normalized_region_maps_to_offset_desktop_coordinates() {
-            let desktop = DesktopBounds {
-                x: -1920,
-                y: 100,
-                width: 1920,
-                height: 1080,
-            };
-            let region = NormalizedRegion::new([0.25, 0.5, 0.5, 0.25]);
-            let bounds = normalized_desktop_bounds(desktop, region).unwrap();
-
-            assert_eq!(
-                bounds,
-                DesktopRegion {
-                    x: -1440,
-                    y: 640,
-                    width: 960,
-                    height: 270,
-                }
-            );
-        }
-
-        #[test]
-        fn hover_chooses_first_topmost_overlapping_window() {
-            let top = [0.2, 0.2, 0.4, 0.4];
-            let windows = [
-                WindowRegion {
-                    bounds: top,
-                    title: "Top".to_owned(),
-                },
-                WindowRegion {
-                    bounds: [0.0, 0.0, 1.0, 1.0],
-                    title: "Bottom".to_owned(),
-                },
-            ];
-
-            assert_eq!(window_region_at(&windows, [0.3, 0.3]), Some(top));
-            assert_eq!(window_region_at(&windows, [1.1, 0.5]), None);
-        }
-    }
-
-    mod sdr {
-        use super::*;
-
-        #[test]
-        fn generated_png_has_native_dimensions_and_no_optional_metadata() {
-            let image = RgbaImage::from_pixel(17, 9, image::Rgba([12, 34, 56, 255]));
-            let payload = encode_sdr_png(image, "private.png").unwrap();
-            let bytes = payload.bytes().unwrap();
-            let decoded = image::load_from_memory(bytes).unwrap();
-            let mut chunks = Vec::new();
-            let mut offset = 8;
-
-            while offset + 12 <= bytes.len() {
-                let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap());
-                let end = offset + 12 + length as usize;
-
-                if end > bytes.len() {
-                    break;
-                }
-
-                chunks.push(&bytes[offset + 4..offset + 8]);
-                offset = end;
-            }
-
-            assert_eq!((decoded.width(), decoded.height()), (17, 9));
-
-            for forbidden in [b"tEXt", b"zTXt", b"iTXt", b"eXIf"] {
-                assert!(!chunks.contains(&forbidden.as_slice()));
-            }
-        }
-
-        #[test]
-        fn generated_filename_preserves_automatic_hdr_marker() {
-            assert_eq!(
-                named_capture_filename("terminal", "region-hdr.jpg"),
-                "terminal-hdr.jpg"
-            );
-            assert_eq!(
-                named_capture_filename("terminal", "region.png"),
-                "terminal.png"
-            );
-        }
-
-        #[test]
-        fn scrgb_reference_white_is_normalized_for_ultra_hdr() {
-            let normalized = scrgb_to_ultra_hdr_linear(1.0);
-
-            assert!((normalized - 80.0 / 203.0).abs() < f32::EPSILON);
-            assert!((scrgb_to_ultra_hdr_linear(203.0 / 80.0) - 1.0).abs() < f32::EPSILON);
-        }
-    }
-}
+#[path = "tests.rs"]
+mod tests;
 
 #[cfg(windows)]
 mod windows_hdr {
@@ -893,10 +1034,6 @@ mod windows_hdr {
                 sdr_channel_lut: Arc::new(OnceLock::new()),
             }
         }
-
-        pub(super) fn release_pixels(&mut self) {
-            self.rgba_f16 = Vec::new();
-        }
     }
 
     struct CaptureOnce {
@@ -937,22 +1074,22 @@ mod windows_hdr {
     }
 
     pub(super) fn capture_primary(color_mode: super::CaptureColorMode) -> Result<UploadPayload> {
-        let frame = capture_frame()?;
+        let monitor = Monitor::primary().context("failed to find the primary display")?;
+        let frame = capture_frame(monitor)?;
 
         encode_automatic(frame, "screenshot", color_mode)
     }
 
     pub(super) fn encode_region(
-        frame: &HdrFrame,
+        mut frame: HdrFrame,
         bounds: super::CropBounds,
     ) -> Result<UploadPayload> {
-        let frame = crop_frame(frame, bounds);
+        crop_frame_in_place(&mut frame, bounds);
 
         encode_automatic(frame, "region", super::CaptureColorMode::Automatic)
     }
 
-    pub(super) fn capture_frame() -> Result<HdrFrame> {
-        let monitor = Monitor::primary().context("failed to find the primary display")?;
+    pub(super) fn capture_frame(monitor: Monitor) -> Result<HdrFrame> {
         let (sender, receiver) = mpsc::channel();
         let advanced_color_enabled = advanced_color_enabled(&monitor).unwrap_or(false);
         let settings = Settings::new(
@@ -997,8 +1134,8 @@ mod windows_hdr {
     }
 
     fn has_extended_range(frame: &HdrFrame) -> bool {
-        frame.rgba_f16.chunks_exact(8).any(|pixel| {
-            pixel[..6].chunks_exact(2).any(|channel| {
+        frame.rgba_f16.as_chunks::<8>().0.iter().any(|pixel| {
+            pixel[..6].as_chunks::<2>().0.iter().any(|channel| {
                 let value = f16::from_le_bytes([channel[0], channel[1]]).to_f32();
 
                 value.is_finite() && value > 1.001
@@ -1043,32 +1180,41 @@ mod windows_hdr {
     }
 
     fn sdr_rgba8(frame: &HdrFrame) -> Result<Vec<u8>> {
+        validate_frame_buffer(frame)?;
+        let mut pixels = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
+        let channel_lut = frame.sdr_channel_lut.get_or_init(build_sdr_channel_lut);
+
+        for pixel in frame.rgba_f16.as_chunks::<8>().0 {
+            append_sdr_pixel(pixel, channel_lut, &mut pixels);
+        }
+
+        Ok(pixels)
+    }
+
+    fn validate_frame_buffer(frame: &HdrFrame) -> Result<()> {
         let expected_len = frame.width as usize * frame.height as usize * 8;
 
         anyhow::ensure!(
             frame.rgba_f16.len() == expected_len,
             "invalid SDR frame buffer length"
         );
-        let mut pixels = Vec::with_capacity(frame.width as usize * frame.height as usize * 4);
-        let channel_lut = frame.sdr_channel_lut.get_or_init(build_sdr_channel_lut);
+        Ok(())
+    }
 
-        for pixel in frame.rgba_f16.chunks_exact(8) {
-            let linear = std::array::from_fn(|index| {
-                let offset = index * 2;
+    fn append_sdr_pixel(pixel: &[u8], channel_lut: &[u8], output: &mut Vec<u8>) {
+        let linear = std::array::from_fn(|index| {
+            let offset = index * 2;
 
-                f16::from_le_bytes([pixel[offset], pixel[offset + 1]]).to_f32()
-            });
+            f16::from_le_bytes([pixel[offset], pixel[offset + 1]]).to_f32()
+        });
 
-            for channel in tone_map_scrgb(linear) {
-                let index = usize::from(f16::from_f32(channel).to_bits());
+        for channel in tone_map_scrgb(linear) {
+            let index = usize::from(f16::from_f32(channel).to_bits());
 
-                pixels.push(channel_lut[index]);
-            }
-
-            pixels.push(255);
+            output.push(channel_lut[index]);
         }
 
-        Ok(pixels)
+        output.push(255);
     }
 
     fn tone_map_scrgb(linear: [f32; 3]) -> [f32; 3] {
@@ -1110,25 +1256,22 @@ mod windows_hdr {
             .into_boxed_slice()
     }
 
-    fn crop_frame(frame: &HdrFrame, bounds: super::CropBounds) -> HdrFrame {
+    fn crop_frame_in_place(frame: &mut HdrFrame, bounds: super::CropBounds) {
         let stride = frame.width as usize * 8;
         let row_bytes = bounds.width as usize * 8;
-        let mut rgba_f16 = Vec::with_capacity(row_bytes * bounds.height as usize);
 
-        for row in bounds.y..bounds.y + bounds.height {
-            let start = row as usize * stride + bounds.x as usize * 8;
+        for destination_row in 0..bounds.height {
+            let source_row = bounds.y + destination_row;
+            let start = source_row as usize * stride + bounds.x as usize * 8;
             let end = start + row_bytes;
+            let destination = destination_row as usize * row_bytes;
 
-            rgba_f16.extend_from_slice(&frame.rgba_f16[start..end]);
+            frame.rgba_f16.copy_within(start..end, destination);
         }
 
-        HdrFrame {
-            width: bounds.width,
-            height: bounds.height,
-            rgba_f16,
-            advanced_color_enabled: frame.advanced_color_enabled,
-            sdr_channel_lut: Arc::clone(&frame.sdr_channel_lut),
-        }
+        frame.rgba_f16.truncate(row_bytes * bounds.height as usize);
+        frame.width = bounds.width;
+        frame.height = bounds.height;
     }
 
     fn encode_ultra_hdr(frame: HdrFrame) -> Result<Vec<u8>> {
@@ -1143,8 +1286,8 @@ mod windows_hdr {
         let mut pixels = frame.rgba_f16;
         let mut peak_linear = 1.0_f32;
 
-        for pixel in pixels.chunks_exact_mut(8) {
-            for channel in pixel[..6].chunks_exact_mut(2) {
+        for pixel in pixels.as_chunks_mut::<8>().0 {
+            for channel in pixel[..6].as_chunks_mut::<2>().0 {
                 let value = f16::from_le_bytes([channel[0], channel[1]]).to_f32();
                 let normalized = if value.is_finite() {
                     super::scrgb_to_ultra_hdr_linear(value.max(0.0))
@@ -1230,9 +1373,13 @@ mod windows_hdr {
 
         // SAFETY: The API only writes the two initialized counts.
         unsafe {
-            GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &mut path_count, &mut mode_count)
-                .ok()
-                .context("failed to size the active display configuration")?;
+            GetDisplayConfigBufferSizes(
+                QDC_ONLY_ACTIVE_PATHS,
+                &raw mut path_count,
+                &raw mut mode_count,
+            )
+            .ok()
+            .context("failed to size the active display configuration")?;
         }
         let mut paths = vec![DISPLAYCONFIG_PATH_INFO::default(); path_count as usize];
         let mut modes = vec![DISPLAYCONFIG_MODE_INFO::default(); mode_count as usize];
@@ -1241,9 +1388,9 @@ mod windows_hdr {
         unsafe {
             QueryDisplayConfig(
                 QDC_ONLY_ACTIVE_PATHS,
-                &mut path_count,
+                &raw mut path_count,
                 paths.as_mut_ptr(),
-                &mut mode_count,
+                &raw mut mode_count,
                 modes.as_mut_ptr(),
                 None,
             )
@@ -1251,11 +1398,18 @@ mod windows_hdr {
             .context("failed to query the active display configuration")?;
         }
 
+        let source_name_size =
+            u32::try_from(std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>())
+                .context("display source descriptor is too large")?;
+        let color_info_size =
+            u32::try_from(std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>())
+                .context("advanced color descriptor is too large")?;
+
         for path in paths.iter().take(path_count as usize) {
             let mut source = DISPLAYCONFIG_SOURCE_DEVICE_NAME {
                 header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                     r#type: DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
-                    size: std::mem::size_of::<DISPLAYCONFIG_SOURCE_DEVICE_NAME>() as u32,
+                    size: source_name_size,
                     adapterId: path.sourceInfo.adapterId,
                     id: path.sourceInfo.id,
                 },
@@ -1263,7 +1417,7 @@ mod windows_hdr {
             };
 
             // SAFETY: The header identifies the initialized output buffer.
-            if unsafe { DisplayConfigGetDeviceInfo(&mut source.header) } != 0 {
+            if unsafe { DisplayConfigGetDeviceInfo(&raw mut source.header) } != 0 {
                 continue;
             }
 
@@ -1284,7 +1438,7 @@ mod windows_hdr {
             let mut color = DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO {
                 header: DISPLAYCONFIG_DEVICE_INFO_HEADER {
                     r#type: DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO,
-                    size: std::mem::size_of::<DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO>() as u32,
+                    size: color_info_size,
                     adapterId: path.targetInfo.adapterId,
                     id: path.targetInfo.id,
                 },
@@ -1293,7 +1447,8 @@ mod windows_hdr {
 
             // SAFETY: The header identifies the initialized output buffer.
             let flags = unsafe {
-                (DisplayConfigGetDeviceInfo(&mut color.header) == 0).then(|| color.Anonymous.value)
+                (DisplayConfigGetDeviceInfo(&raw mut color.header) == 0)
+                    .then_some(color.Anonymous.value)
             };
 
             if let Some(flags) = flags {
@@ -1372,6 +1527,26 @@ mod windows_hdr {
             use super::*;
 
             #[test]
+            fn region_crop_compacts_the_hdr_frame_in_place() {
+                let mut frame = solid_frame(8, 6, 1.0, false);
+                let allocation = frame.rgba_f16.as_ptr();
+
+                crop_frame_in_place(
+                    &mut frame,
+                    super::super::super::CropBounds {
+                        x: 2,
+                        y: 1,
+                        width: 4,
+                        height: 3,
+                    },
+                );
+
+                assert_eq!((frame.width, frame.height), (4, 3));
+                assert_eq!(frame.rgba_f16.len(), 4 * 3 * 8);
+                assert_eq!(frame.rgba_f16.as_ptr(), allocation);
+            }
+
+            #[test]
             fn forced_sdr_uses_native_resolution_png_for_an_hdr_frame() {
                 let frame = solid_frame(17, 9, 5.0, true);
                 let payload =
@@ -1443,17 +1618,18 @@ mod windows_hdr {
                         sys::uhdr_color_transfer::UHDR_CT_LINEAR,
                     )
                     .unwrap();
-                let channel = view.row(0).unwrap();
-                let decoded = f16::from_le_bytes([channel[0], channel[1]]).to_f32();
+                let first_row = view.row(0).unwrap();
+                let hdr_value = f16::from_le_bytes([first_row[0], first_row[1]]).to_f32();
 
-                assert!(decoded > 1.3, "decoded linear HDR value was {decoded}");
+                assert!(hdr_value > 1.3, "decoded linear HDR value was {hdr_value}");
             }
 
             #[test]
             fn sdr_base_stays_sharp_and_gain_map_is_full_resolution() {
-                let width = 32;
-                let height = 16;
-                let mut rgba_f16 = Vec::with_capacity(width * height * 8);
+                let width = 32_u32;
+                let height = 16_u32;
+                let capacity = usize::try_from(width * height * 8).unwrap();
+                let mut rgba_f16 = Vec::with_capacity(capacity);
 
                 for _y in 0..height {
                     for x in 0..width {
@@ -1466,8 +1642,7 @@ mod windows_hdr {
                 }
 
                 let mut encoded =
-                    encode_ultra_hdr(HdrFrame::new(width as u32, height as u32, rgba_f16, true))
-                        .unwrap();
+                    encode_ultra_hdr(HdrFrame::new(width, height, rgba_f16, true)).unwrap();
                 let dimensions = jpeg_frame_dimensions(&encoded);
 
                 assert!(
@@ -1488,7 +1663,9 @@ mod windows_hdr {
                     .unwrap();
                 let row = view.row(8).unwrap();
                 let contrast = row
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|pixel| i16::from(pixel[0]))
                     .collect::<Vec<_>>()
                     .windows(2)

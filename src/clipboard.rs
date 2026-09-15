@@ -1,6 +1,6 @@
 //! Cross-platform clipboard ingestion and result copying.
 
-use std::io::Cursor;
+use std::{io::Cursor, path::Path};
 
 use anyhow::{Context, Result, bail, ensure};
 use arboard::Clipboard;
@@ -71,4 +71,19 @@ pub fn copy_link(link: &str) -> Result<()> {
         .context("clipboard is unavailable")?
         .set_text(link)
         .context("failed to copy upload link")
+}
+
+/// Put a local file on the clipboard so it can be pasted into another application.
+///
+/// # Errors
+///
+/// Returns an error when the path is not a file or the clipboard cannot be changed.
+pub fn copy_file(path: &Path) -> Result<()> {
+    ensure!(path.is_file(), "local capture no longer exists");
+
+    Clipboard::new()
+        .context("clipboard is unavailable")?
+        .set()
+        .file_list(&[path])
+        .context("failed to copy local file")
 }

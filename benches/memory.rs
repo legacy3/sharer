@@ -38,5 +38,5 @@ fn move_history_entry() -> HistoryEntry {
         expires_at: "2026-09-09T00:00:00Z".to_owned(),
     };
 
-    HistoryEntry::from_receipt(black_box(receipt))
+    HistoryEntry::from_receipt(black_box(receipt), None)
 }

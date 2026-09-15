@@ -9,6 +9,7 @@ export component CaptureView inherits Rectangle {
     in property <float> upload-progress;
     in property <bool> recording;
     in property <bool> configured;
+    in property <bool> capture-enabled;
     in property <string> region-hotkey;
     in property <string> recording-hotkey;
     in property <string> screen-hotkey;
@@ -16,23 +17,33 @@ export component CaptureView inherits Rectangle {
     in property <string> status-text;
     in property <string> status-detail;
     in property <string> last-link;
+    in property <string> last-local-path;
     in property <string> last-delete-url;
     in property <bool> last-delete-saved;
     in property <bool> update-available;
     in property <string> update-version;
     property <length> action-width: (root.width - 24px) / 5;
-    property <bool> show-activity: root.configured
-        && (root.busy || root.uploading || root.recording || root.last-link != ""
-            || root.last-delete-url != "" || root.status-text != "Ready" || root.status-detail != "");
+    property <bool> show-activity: root.busy || root.uploading || root.recording || root.last-link != ""
+            || root.last-local-path != "" || root.last-delete-url != "" || root.status-text != "Ready";
+    property <bool> status-is-error: root.status-text == "Upload failed"
+            || root.status-text == "Upload cancelled"
+            || root.status-text == "Upload timed out"
+            || root.status-text == "Capture failed"
+            || root.status-text == "Save failed"
+            || root.status-text == "Settings invalid";
 
     callback capture-region();
     callback record-region();
     callback capture-screen();
     callback upload-clipboard();
     callback choose-file();
+    callback cancel-upload();
     callback open-link();
     callback copy-link();
     callback copy-delete();
+    callback open-local();
+    callback reveal-local();
+    callback copy-file();
     callback open-update();
     callback show-settings();
 
@@ -43,7 +54,7 @@ export component CaptureView inherits Rectangle {
 
         if !root.configured: InlineNotice {
             text: "Uploader not configured";
-            detail: "Add an endpoint before uploading.";
+            detail: "Local captures still work. Add an endpoint for uploads.";
             action-text: "Settings";
             action => { root.show-settings(); }
         }
@@ -61,45 +72,49 @@ export component CaptureView inherits Rectangle {
             spacing: 6px;
             ActionCard {
                 width: root.action-width; title: "Region"; subtitle: root.width >= 650px ? root.region-hotkey : ""; icon-source: Icons.crop;
-                enabled: !root.busy && root.configured; clicked => { root.capture-region(); }
+                enabled: !root.busy && root.capture-enabled; clicked => { root.capture-region(); }
             }
             ActionCard {
                 width: root.action-width; title: root.recording ? "Stop" : "Record";
                 subtitle: root.width >= 650px ? (root.recording ? "Finish and upload" : root.recording-hotkey) : ""; icon-source: Icons.recording;
-                destructive: root.recording; enabled: (!root.busy || root.recording) && root.configured;
+                destructive: root.recording; enabled: (!root.busy || root.recording) && root.capture-enabled;
                 clicked => { root.record-region(); }
             }
             ActionCard {
                 width: root.action-width; title: "Screen"; subtitle: root.width >= 650px ? root.screen-hotkey : ""; icon-source: Icons.screen;
-                enabled: !root.busy && root.configured; clicked => { root.capture-screen(); }
+                enabled: !root.busy && root.capture-enabled; clicked => { root.capture-screen(); }
             }
             ActionCard {
                 width: root.action-width; title: "Clipboard"; subtitle: root.width >= 650px ? root.clipboard-hotkey : ""; icon-source: Icons.clipboard;
                 enabled: !root.busy && root.configured; clicked => { root.upload-clipboard(); }
             }
             ActionCard {
-                width: root.action-width; title: "File"; icon-source: Icons.file;
+                width: root.action-width; title: "File"; subtitle: root.width >= 650px ? "Choose & upload" : ""; icon-source: Icons.file;
                 enabled: !root.busy && root.configured; clicked => { root.choose-file(); }
             }
         }
 
-        if root.show-activity: SectionHeading { text: "ACTIVITY"; }
+        if root.show-activity: SectionHeading { text: root.busy || root.recording ? "ACTIVITY" : "LAST RESULT"; }
 
         if root.show-activity: SectionCard {
-            height: root.last-delete-url != "" ? 122px : (root.last-link != "" || root.uploading ? 92px : 72px);
-            border-color: root.status-text == "Upload failed" ? Theme.danger : Theme.border;
+            height: 72px
+                    + (root.last-link != "" ? 20px : 0px)
+                    + (root.last-local-path != "" ? 30px : 0px)
+                    + (root.last-delete-url != "" ? 30px : 0px)
+                    + (root.uploading ? 20px : 0px);
+            border-color: root.status-is-error ? Theme.danger : Theme.border;
             HorizontalLayout {
                 padding: 11px;
                 spacing: 10px;
                 Rectangle {
                     width: 3px;
                     border-radius: 1px;
-                    background: root.status-text == "Upload failed" ? Theme.danger : (root.busy ? Theme.accent : Theme.success);
+                    background: root.status-is-error ? Theme.danger : (root.busy ? Theme.accent : Theme.success);
                 }
                 VerticalLayout {
                     alignment: center;
                     spacing: 4px;
-                    Text { text: root.status-text; color: Theme.text; font-size: 12px; font-weight: 700; }
+                    Text { text: root.status-text; color: Theme.text; font-size: 14px; font-weight: 700; }
                     CaptionText { text: root.status-detail; color: Theme.text-soft; }
                     if root.uploading: HorizontalLayout {
                         spacing: 10px;
@@ -120,9 +135,14 @@ export component CaptureView inherits Rectangle {
                             width: 32px;
                             text: round(root.upload-progress * 100) + "%";
                             color: Theme.text-soft;
-                            font-size: 8px;
+                            font-size: 10px;
                             horizontal-alignment: right;
                             vertical-alignment: center;
+                        }
+                        FlatButton {
+                            width: 96px;
+                            text: "Cancel upload";
+                            clicked => { root.cancel-upload(); }
                         }
                     }
                     if root.last-link != "": HorizontalLayout {
@@ -130,6 +150,13 @@ export component CaptureView inherits Rectangle {
                         CaptionText { text: root.last-link; color: Theme.primary-bright; vertical-alignment: center; }
                         FlatButton { width: 62px; text: "Copy"; icon-source: Icons.copy; has-icon: true; clicked => { root.copy-link(); } }
                         FlatButton { width: 62px; text: "Open"; icon-source: Icons.open; has-icon: true; clicked => { root.open-link(); } }
+                    }
+                    if root.last-local-path != "": HorizontalLayout {
+                        spacing: 6px;
+                        CaptionText { text: root.last-local-path; color: Theme.text-soft; vertical-alignment: center; }
+                        FlatButton { width: 58px; text: "Open"; clicked => { root.open-local(); } }
+                        FlatButton { width: 62px; text: "Folder"; clicked => { root.reveal-local(); } }
+                        FlatButton { width: 72px; text: "Copy file"; clicked => { root.copy-file(); } }
                     }
                     if root.last-delete-url != "": HorizontalLayout {
                         spacing: 6px;
