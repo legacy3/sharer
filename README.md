@@ -1,6 +1,6 @@
 # ShareR
 
-ShareR captures, records, and uploads from one small desktop app. It handles screen regions, full displays, clipboard content, and ordinary files, then puts the resulting link on your clipboard. Use one of the built-in providers or bring your own upload endpoint.
+ShareR captures, records, and optionally uploads from one small desktop app. It handles screen regions, full displays, clipboard content, and ordinary files. Use one of the built-in providers or bring your own upload endpoint when you want public links.
 
 ## What you can do
 
@@ -8,13 +8,13 @@ ShareR captures, records, and uploads from one small desktop app. It handles scr
 
 **Share almost anything.** Upload files, clipboard images, clipboard text, and copied files through the same workflow.
 
-**Keep control.** Save local copies, strip EXIF, hide window titles behind random names, and require Tor when a direct upload is not acceptable.
+**Keep control.** Captures stay local by default. You can opt into automatic uploads, strip EXIF, hide window titles behind random names, and require Tor when a direct upload is not acceptable.
 
 **Stay out of the way.** ShareR lives in the system tray, responds to global shortcuts, and keeps old uploads in a small local history.
 
 ## Built to stay small
 
-Low memory use is a core architecture constraint in ShareR. Files stream from disk, upload progress stays bounded, history loads in pages, and closing the window to the tray releases the desktop UI. Generated captures and recordings move into the upload pipeline without copying their full buffers.
+Low memory use is a core architecture constraint in ShareR. Files stream from disk, upload progress stays bounded, history loads in pages, and closing the window to the tray releases the desktop UI. Region selection prepares displays serially, keeps only bounded previews, and releases them after the click. The selected region is then recaptured at full configured quality, with temporary working buffers released as each processing stage completes. Generated captures and recordings move into the upload pipeline without copying their full buffers.
 
 > “A move from 64K to 640K felt like something that would last a great deal of time. Well, it didn't.”
 >
@@ -90,11 +90,11 @@ The headless archive has no graphical dependencies.
 
 ## Set it up
 
-Open **Settings → Upload** and choose a provider. Imgur needs a client ID, s-ul needs an API key, and vgy.me accepts an optional user key. Uguu and transfer.sh work without credentials.
+Captures work locally without configuring an uploader. To create public links, open **Settings → Upload** and choose a provider, then enable automatic capture uploads under **Settings → Capture**. Imgur needs a client ID, s-ul needs an API key, and vgy.me accepts an optional user key. Uguu and transfer.sh work without credentials.
 
 The Custom provider accepts your own endpoint and one optional request header. The exact request and response format is documented in [Custom uploaders](docs/custom-uploaders.md).
 
-Generated captures are saved locally by default. Change the folder or turn local copies off under **Settings → Capture**.
+Generated captures are saved locally by default under your Pictures directory in `ShareR/YYYY-MM`. Change the root folder or output behavior under **Settings → Capture**.
 
 ## Settings worth knowing
 
@@ -102,9 +102,13 @@ Generated captures are saved locally by default. Change the folder or turn local
 
 **Retina output.** Macs can keep native pixels or reduce captures to logical size. Fast, Balanced, and Sharp resizing are available, with Fast as the default.
 
-**HDR output.** Windows HDR displays are detected automatically. Force SDR PNG output is available when compatibility matters more than HDR.
+**HDR output.** Windows HDR displays are detected automatically. Force SDR PNG output always creates a standard PNG when compatibility matters more than HDR. Automatic mode keeps HDR output available at every supported capture size. Screenshot processing may temporarily use memory proportional to the source display, selected region, resize filter, and encoded output, then releases those working buffers when capture processing completes.
 
-**Local copies.** Screenshots and recordings are saved beside the application database unless you choose another folder.
+**History actions.** History records when each new capture was created and defaults to newest first; switch to oldest first from the page header. Right-click an entry, or use its action buttons, to open or copy its local file and path, reveal it in the system file manager, use its remote URLs, or remove it from history.
+
+**Last result.** The Capture page keeps only the latest operation visible. Local results can be opened, revealed, or copied immediately; uploaded results expose their public and deletion links. The idle Ready message stays out of the way.
+
+**Tray click.** A single left click captures a region by default. Change or disable that action under **Settings → General**. Double click opens ShareR, and right click opens the tray menu.
 
 ## Default shortcuts
 
@@ -138,7 +142,12 @@ ShareR document.pdf --require-tor
 # Browse history
 ShareR --history
 ShareR --history --history-limit 5 --json
+
+# Start the desktop app with its CPU-only recovery renderer
+ShareR --renderer software
 ```
+
+The desktop defaults to the platform's preferred renderer. Use `--renderer gpu` to require it or `--renderer software` if the GPU renderer is unavailable or misbehaves. `auto` continues to honor Slint's renderer environment overrides.
 
 Run `ShareR --help` for every option.
 
@@ -162,7 +171,7 @@ Settings and upload history live in `sharer.sqlite3`:
 | macOS    | `~/Library/Application Support/re.sharer`        |
 | Linux    | `$XDG_CONFIG_HOME/sharer`, or `~/.config/sharer` |
 
-Close ShareR before copying the database. It contains settings, upload history, and sensitive deletion URLs. The neighboring `files` directory contains local captures when the default folder is active.
+Close ShareR before copying the database. It contains settings, capture history, local file paths, and sensitive deletion URLs. Local captures are stored separately under the configured capture directory, which defaults to `Pictures/ShareR`.
 
 ## Contributing
 
