@@ -1,0 +1,62 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug ShareR",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--features", "desktop", "--bin", "ShareR"],
+        "filter": {
+          "name": "ShareR",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Debug ShareR in background",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--features", "desktop", "--bin", "ShareR"],
+        "filter": {
+          "name": "ShareR",
+          "kind": "bin"
+        }
+      },
+      "args": ["--background"],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "sourceLanguages": ["rust"]
+    },
+    {
+      "name": "Debug ShareR (software renderer)",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["build", "--features", "desktop", "--bin", "ShareR"],
+        "filter": {
+          "name": "ShareR",
+          "kind": "bin"
+        }
+      },
+      "args": ["--renderer", "software"],
+      "cwd": "${workspaceFolder}",
+      "terminal": "integrated",
+      "env": {
+        "RUST_BACKTRACE": "1"
+      },
+      "sourceLanguages": ["rust"]
+    }
+  ]
+}

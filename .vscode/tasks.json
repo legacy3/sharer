@@ -1,0 +1,87 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "ShareR: run desktop",
+      "type": "process",
+      "command": "cargo",
+      "args": ["run", "--features", "desktop", "--bin", "ShareR"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$rustc"],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "ShareR: build desktop",
+      "type": "process",
+      "command": "cargo",
+      "args": ["build", "--features", "desktop", "--bin", "ShareR"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    },
+    {
+      "label": "ShareR: run desktop (software renderer)",
+      "type": "process",
+      "command": "cargo",
+      "args": [
+        "run",
+        "--features",
+        "desktop",
+        "--bin",
+        "ShareR",
+        "--",
+        "--renderer",
+        "software"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$rustc"],
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "ShareR: test desktop",
+      "type": "process",
+      "command": "cargo",
+      "args": ["test", "--features", "desktop", "--lib", "--bins", "--tests"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$rustc"],
+      "group": "test"
+    },
+    {
+      "label": "ShareR: format check",
+      "type": "process",
+      "command": "cargo",
+      "args": ["fmt", "--check"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "ShareR: clippy desktop",
+      "type": "process",
+      "command": "cargo",
+      "args": ["clippy", "--features", "desktop", "--all-targets"],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": ["$rustc"]
+    }
+  ]
+}
