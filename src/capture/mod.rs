@@ -86,8 +86,10 @@ pub struct CapturedScreen {
 /// A lightweight recipe for recapturing the chosen display after selection.
 #[derive(Clone, Debug)]
 pub struct SelectedRegionCapture {
+    #[cfg(windows)]
     desktop_bounds: DesktopBounds,
     desktop_region: DesktopRegion,
+    #[cfg(windows)]
     snapped_window: Option<DesktopBounds>,
     #[cfg(windows)]
     color_mode: CaptureColorMode,
@@ -176,13 +178,16 @@ impl CapturedScreen {
         &self,
         region: NormalizedRegion,
     ) -> Result<SelectedRegionCapture> {
+        #[cfg(windows)]
         let snapped_window = self
             .snapped_window(region)
             .map(|window| window.desktop_bounds);
 
         Ok(SelectedRegionCapture {
+            #[cfg(windows)]
             desktop_bounds: self.desktop_bounds,
             desktop_region: self.desktop_region(region)?,
+            #[cfg(windows)]
             snapped_window,
             #[cfg(windows)]
             color_mode: self.color_mode,
@@ -205,6 +210,7 @@ impl CapturedScreen {
     }
 }
 
+#[cfg(windows)]
 impl SelectedRegionCapture {
     fn crop_bounds(&self, image_width: u32, image_height: u32) -> Result<CropBounds> {
         if let Some(window) = self.snapped_window {
@@ -876,6 +882,7 @@ fn normalized_desktop_bounds(
     })
 }
 
+#[cfg(any(windows, test))]
 fn exact_window_bounds(
     desktop: DesktopBounds,
     window: DesktopBounds,
@@ -911,6 +918,7 @@ fn exact_window_bounds(
     })
 }
 
+#[cfg(any(windows, test))]
 fn scale_coordinate(value: u32, source_extent: u32, target_extent: u32) -> Result<u32> {
     anyhow::ensure!(source_extent > 0, "captured display has an empty extent");
 
