@@ -4,6 +4,7 @@ use std::{
     fmt,
     io::{Cursor, ErrorKind, Read, Seek, SeekFrom, Write as _},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicBool, Ordering},
     time::Duration,
 };
 
@@ -14,7 +15,7 @@ use cap_std::{
     ambient_authority,
     fs::{Dir, OpenOptions},
 };
-use futures_util::StreamExt as _;
+use futures_util::{StreamExt as _, future};
 use reqwest::{
     Client, Url,
     header::{HeaderMap, HeaderName, HeaderValue},
@@ -33,6 +34,85 @@ pub use providers::UploaderKind;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const TOTAL_TIMEOUT: Duration = Duration::from_mins(15);
+const CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[derive(Clone, Copy, Debug)]
+struct UploadTimeouts {
+    connect: Duration,
+    read: Duration,
+    total: Duration,
+}
+
+const DEFAULT_UPLOAD_TIMEOUTS: UploadTimeouts = UploadTimeouts {
+    connect: CONNECT_TIMEOUT,
+    read: READ_TIMEOUT,
+    total: TOTAL_TIMEOUT,
+};
+
+/// Cooperative cancellation handle for an in-flight upload.
+#[derive(Debug, Default)]
+pub struct UploadCancellation {
+    cancelled: AtomicBool,
+}
+
+impl UploadCancellation {
+    /// Create an idle cancellation handle.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    /// Request cancellation of the current upload.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    /// Prepare the handle for a new upload.
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::Release);
+    }
+
+    /// Return whether cancellation has been requested.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("upload cancelled")]
+struct UploadCancelled;
+
+/// Return whether an upload error was caused by explicit cancellation.
+#[must_use]
+pub fn is_upload_cancelled(error: &(dyn std::error::Error + 'static)) -> bool {
+    error_chain(error).any(is_cancelled_cause)
+}
+
+fn is_cancelled_cause(cause: &(dyn std::error::Error + 'static)) -> bool {
+    cause.is::<UploadCancelled>()
+}
+
+/// Return whether an upload error was caused by a request or response timeout.
+#[must_use]
+pub fn is_upload_timeout(error: &(dyn std::error::Error + 'static)) -> bool {
+    error_chain(error).any(|cause| {
+        cause
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+    })
+}
+
+fn error_chain<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> impl Iterator<Item = &'a (dyn std::error::Error + 'static)> {
+    std::iter::successors(Some(error), |cause| cause.source())
+}
 
 /// Owned provider configuration passed to the upload worker.
 #[derive(Clone, Default, Eq, PartialEq)]
@@ -155,6 +235,21 @@ impl UploadPayload {
             filename,
             mime,
         }
+    }
+
+    /// Return the number of bytes in the payload body.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        match &self.body {
+            PayloadBody::Bytes(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            PayloadBody::File { length, .. } | PayloadBody::Reader { length, .. } => *length,
+        }
+    }
+
+    /// Return whether the payload body is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Open a file for streaming without transcoding it, retaining HDR and other metadata.
@@ -311,13 +406,6 @@ impl UploadPayload {
         match &self.body {
             PayloadBody::Bytes(bytes) => Some(bytes),
             PayloadBody::File { .. } | PayloadBody::Reader { .. } => None,
-        }
-    }
-
-    fn length(&self) -> u64 {
-        match &self.body {
-            PayloadBody::Bytes(bytes) => u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            PayloadBody::File { length, .. } | PayloadBody::Reader { length, .. } => *length,
         }
     }
 
@@ -479,32 +567,7 @@ impl UploadClient {
     ///
     /// Returns an error if the target, URL, credential, or HTTP client is invalid.
     pub fn for_target(target: &UploadTarget, route: &UploadRoute) -> Result<Self> {
-        target.validate()?;
-        let default_headers = target.kind.headers(target)?;
-
-        ensure_tls_provider();
-        let builder = Client::builder()
-            .connect_timeout(Duration::from_secs(15))
-            .default_headers(default_headers)
-            .user_agent(concat!("sharer/", env!("CARGO_PKG_VERSION")));
-        let builder = match route {
-            UploadRoute::Direct => builder,
-
-            UploadRoute::Socks5(url) => builder
-                .no_proxy()
-                .proxy(reqwest::Proxy::all(url).context("invalid SOCKS5 proxy URL")?),
-        };
-        let client = builder.build().context("failed to build HTTP client")?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("failed to initialize the upload runtime")?;
-
-        Ok(Self {
-            client,
-            runtime,
-            target: target.clone(),
-        })
+        Self::for_target_with_timeouts(target, route, DEFAULT_UPLOAD_TIMEOUTS)
     }
 
     /// Upload a payload with the requested deletion lifetime.
@@ -513,7 +576,14 @@ impl UploadClient {
     ///
     /// Returns an error for invalid lifetimes, HTTP failures, or malformed responses.
     pub fn upload(&self, payload: UploadPayload, lifetime_seconds: u32) -> Result<UploadReceipt> {
-        self.upload_with_progress(payload, lifetime_seconds, |_transferred, _total| {})
+        let cancellation = UploadCancellation::default();
+
+        self.upload_with_progress_and_cancellation(
+            payload,
+            lifetime_seconds,
+            &cancellation,
+            |_transferred, _total| {},
+        )
     }
 
     /// Upload a payload and report body bytes as the HTTP client consumes them.
@@ -530,18 +600,48 @@ impl UploadClient {
     where
         F: Fn(u64, u64) + Send + 'static,
     {
+        let cancellation = UploadCancellation::default();
+
+        self.upload_with_progress_and_cancellation(
+            payload,
+            lifetime_seconds,
+            &cancellation,
+            progress,
+        )
+    }
+
+    /// Upload a payload with progress reporting and cooperative cancellation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for cancellation, timeouts, invalid input, HTTP failures, or malformed responses.
+    pub fn upload_with_progress_and_cancellation<F>(
+        &self,
+        payload: UploadPayload,
+        lifetime_seconds: u32,
+        cancellation: &UploadCancellation,
+        progress: F,
+    ) -> Result<UploadReceipt>
+    where
+        F: Fn(u64, u64) + Send + 'static,
+    {
         validate_lifetime(lifetime_seconds)?;
+
+        if cancellation.is_cancelled() {
+            return Err(UploadCancelled.into());
+        }
+
         anyhow::ensure!(
             !self.target.kind.images_only() || payload.mime.starts_with("image/"),
             "{} only accepts images",
             self.target.kind.name()
         );
         let filename = payload.filename.clone();
-        let size_bytes = payload.length();
+        let size_bytes = payload.len();
         let url = self.target.kind.endpoint(&self.target, lifetime_seconds)?;
         let part = payload.into_part_with_progress(progress)?;
         let form = self.target.kind.form(part, &self.target);
-        let (status, delete_header, body) = self.runtime.block_on(async {
+        let upload = async {
             let response = self
                 .client
                 .post(url)
@@ -571,6 +671,20 @@ impl UploadClient {
             }
 
             Ok::<_, anyhow::Error>((status, delete_header, body))
+        };
+        let wait_for_cancellation = async {
+            while !cancellation.is_cancelled() {
+                tokio::time::sleep(CANCELLATION_POLL_INTERVAL).await;
+            }
+        };
+        let (status, delete_header, body) = self.runtime.block_on(async {
+            futures_util::pin_mut!(upload);
+            futures_util::pin_mut!(wait_for_cancellation);
+
+            match future::select(upload, wait_for_cancellation).await {
+                future::Either::Left((result, _)) => result,
+                future::Either::Right(((), _)) => Err(UploadCancelled.into()),
+            }
         })?;
 
         if !status.is_success() {
@@ -605,6 +719,41 @@ impl UploadClient {
         }
 
         Ok(receipt)
+    }
+
+    fn for_target_with_timeouts(
+        target: &UploadTarget,
+        route: &UploadRoute,
+        timeouts: UploadTimeouts,
+    ) -> Result<Self> {
+        target.validate()?;
+        let default_headers = target.kind.headers(target)?;
+
+        ensure_tls_provider();
+        let builder = Client::builder()
+            .connect_timeout(timeouts.connect)
+            .read_timeout(timeouts.read)
+            .timeout(timeouts.total)
+            .default_headers(default_headers)
+            .user_agent(concat!("sharer/", env!("CARGO_PKG_VERSION")));
+        let builder = match route {
+            UploadRoute::Direct => builder,
+
+            UploadRoute::Socks5(url) => builder
+                .no_proxy()
+                .proxy(reqwest::Proxy::all(url).context("invalid SOCKS5 proxy URL")?),
+        };
+        let client = builder.build().context("failed to build HTTP client")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("failed to initialize the upload runtime")?;
+
+        Ok(Self {
+            client,
+            runtime,
+            target: target.clone(),
+        })
     }
 }
 
@@ -779,137 +928,5 @@ pub struct UploadReceipt {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn lifetime_is_appended_as_seconds() {
-        let endpoint = Url::parse("https://uploads.example/upload?source=desktop").unwrap();
-        let url = endpoint_with_lifetime(&endpoint, 3_600);
-
-        assert_eq!(
-            url.as_str(),
-            "https://uploads.example/upload?source=desktop&time=3600"
-        );
-    }
-
-    #[test]
-    fn configured_lifetime_is_replaced() {
-        let endpoint = Url::parse("https://uploads.example/upload?time=12&token=public").unwrap();
-        let url = endpoint_with_lifetime(&endpoint, 60);
-
-        assert_eq!(
-            url.as_str(),
-            "https://uploads.example/upload?token=public&time=60"
-        );
-    }
-
-    #[test]
-    fn response_links_must_be_absolute_http_urls() {
-        assert!(validate_response_url("https://files.example/a", "public link").is_ok());
-        assert!(validate_response_url("file:///tmp/secret", "public link").is_err());
-        assert!(validate_response_url("javascript:alert(1)", "public link").is_err());
-        assert!(validate_response_url("/relative", "public link").is_err());
-    }
-
-    #[test]
-    fn error_detail_truncation_preserves_utf8_boundaries() {
-        let body = "\u{00e9}".repeat(301);
-        let detail = body
-            .char_indices()
-            .nth(300)
-            .map_or(body.as_str(), |(boundary, _character)| &body[..boundary]);
-
-        assert_eq!(detail.chars().count(), 300);
-    }
-
-    #[test]
-    fn generated_payload_retains_bytes() {
-        let payload = UploadPayload::from_bytes(
-            vec![1, 2, 3],
-            "sample.bin".to_owned(),
-            "application/octet-stream".to_owned(),
-        );
-
-        assert_eq!(payload.bytes(), Some([1, 2, 3].as_slice()));
-    }
-
-    #[test]
-    fn response_body_is_bounded() {
-        let accepted = vec![0_u8; MAX_RESPONSE_BYTES];
-        let rejected = vec![0_u8; MAX_RESPONSE_BYTES + 1];
-
-        assert_eq!(
-            read_response_body(Cursor::new(accepted)).unwrap().len(),
-            MAX_RESPONSE_BYTES
-        );
-        assert!(read_response_body(Cursor::new(rejected)).is_err());
-    }
-
-    #[test]
-    fn progress_callback_count_is_bounded_by_percentage() {
-        use std::sync::{Arc, Mutex};
-
-        let events = Arc::new(Mutex::new(Vec::new()));
-        let captured_events = Arc::clone(&events);
-        let source = Cursor::new(vec![0_u8; 1024 * 1024]);
-        let mut reader = ProgressReader::new(source, 1024 * 1024, move |done, total| {
-            captured_events.lock().unwrap().push((done, total));
-        });
-        let mut buffer = [0_u8; 1024];
-
-        while reader.read(&mut buffer).unwrap() != 0 {}
-
-        let events = events.lock().unwrap();
-
-        assert!(events.len() <= 101);
-        assert_eq!(events.last(), Some(&(1024 * 1024, 1024 * 1024)));
-    }
-
-    #[test]
-    fn custom_header_validation_rejects_injection() {
-        assert!(validate_upload_header("Authorization", "Bearer secret").is_ok());
-        assert!(validate_upload_header("", "secret").is_err());
-        assert!(validate_upload_header("Authorization\r\nInjected", "secret").is_err());
-        assert!(validate_upload_header("Authorization", "secret\r\nInjected: yes").is_err());
-        assert!(validate_upload_header("Content-Length", "1").is_err());
-        assert!(validate_upload_header("Host", "elsewhere.example").is_err());
-        assert!(validate_upload_header("Content-Type", "text/plain").is_err());
-        assert!(validate_upload_header("Expect", "100-continue").is_err());
-    }
-
-    #[test]
-    fn generated_copies_never_replace_an_existing_capture() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut payload = UploadPayload::from_bytes(
-            vec![1, 2, 3],
-            "sample.png".to_owned(),
-            "image/png".to_owned(),
-        );
-
-        let first = payload.save_generated_copy(directory.path()).unwrap();
-        let second = payload.save_generated_copy(directory.path()).unwrap();
-
-        assert_eq!(first.file_name().unwrap(), "sample.png");
-        assert_eq!(second.file_name().unwrap(), "sample-1.png");
-        assert_eq!(std::fs::read(first).unwrap(), [1, 2, 3]);
-        assert_eq!(std::fs::read(second).unwrap(), [1, 2, 3]);
-    }
-
-    #[test]
-    fn generated_reader_is_rewound_after_each_local_copy() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut payload = UploadPayload::from_reader(
-            Cursor::new(vec![4, 5, 6]),
-            3,
-            "sample.webp".to_owned(),
-            "image/webp".to_owned(),
-        );
-
-        let first = payload.save_generated_copy(directory.path()).unwrap();
-        let second = payload.save_generated_copy(directory.path()).unwrap();
-
-        assert_eq!(std::fs::read(first).unwrap(), [4, 5, 6]);
-        assert_eq!(std::fs::read(second).unwrap(), [4, 5, 6]);
-    }
-}
+#[path = "tests.rs"]
+mod tests;
