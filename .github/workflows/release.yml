@@ -175,6 +175,8 @@ jobs:
           plutil -lint "$app/Contents/Info.plist"
           test -s "$app/Contents/Resources/ShareR.icns"
           chmod +x "$app/Contents/MacOS/ShareR"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
           cp CONTRIBUTING.md LICENSE README.md assets/icons/FONT-AWESOME-LICENSE.txt "$root/"
           mkdir -p "$root/docs/screenshots"
           cp docs/custom-uploaders.md "$root/docs/"

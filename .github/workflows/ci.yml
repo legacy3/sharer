@@ -178,6 +178,8 @@ jobs:
           plutil -lint "$app/Contents/Info.plist"
           test -s "$app/Contents/Resources/ShareR.icns"
           chmod +x "$app/Contents/MacOS/ShareR"
+          codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
           cp LICENSE assets/icons/FONT-AWESOME-LICENSE.txt artifact/
           tar -C artifact -czf "sharer-ci-${{ matrix.asset }}.tar.gz" ShareR.app LICENSE FONT-AWESOME-LICENSE.txt
 
