@@ -112,9 +112,7 @@ pub(super) fn start_screenshot(
     clear_last_receipt(window);
     window.set_busy(true);
     window.set_status_text("Select a region".into());
-    window.set_status_detail(
-        "Click a window, press Space to drag a region, or press Esc to cancel".into(),
-    );
+    window.set_status_detail("Drag to capture a region, or press Esc to cancel".into());
     let _ = window.hide();
     let main_window = window.as_weak();
 
@@ -185,7 +183,7 @@ fn native_macos_screenshot() -> Result<Option<UploadPayload>> {
         .context("failed to create a temporary capture directory")?;
     let path = directory.path().join("capture.png");
     let output = Command::new("/usr/sbin/screencapture")
-        .args(["-i", "-W", "-x", "-T", "0", "-t", "png"])
+        .args(["-i", "-s", "-x", "-t", "png"])
         .arg(&path)
         .output()
         .context("failed to launch the macOS capture tool")?;
