@@ -98,6 +98,7 @@ core-graphics = { version = "0.23.2", default-features = false, features = ["lin
 reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "multipart", "native-tls", "socks", "stream", "system-proxy"] }
 screencapturekit = { version = "8.0.1", default-features = false, features = ["macos_14_0"], optional = true }
 slint = { version = "1.15.1", default-features = false, features = ["renderer-skia"], optional = true }
+tempfile = "3.27"
 
 [build-dependencies]
 slint-build = { version = "1.15.1", optional = true }

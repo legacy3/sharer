@@ -11,11 +11,18 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use std::process::Command;
+
+#[cfg(target_os = "macos")]
+use anyhow::{Context as _, Result};
 use num_traits::ToPrimitive as _;
 use slint::ComponentHandle as _;
 use slint::winit_030::WinitWindowAccessor as _;
 
 use crate::{AppWindow, RegionWindow, views};
+#[cfg(target_os = "macos")]
+use sharer::upload::UploadPayload;
 use sharer::{
     capture,
     config::{CaptureResolution, ResizeQuality},
@@ -46,16 +53,162 @@ struct RegionUpload {
 
 #[derive(Clone, Debug)]
 enum RegionPurpose {
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     Screenshot,
     Recording(RecordingControl),
 }
 
+#[cfg(not(target_os = "macos"))]
 pub(super) fn start_screenshot(
     window: &AppWindow,
     sender: Sender<Job>,
     cancellation: Arc<UploadCancellation>,
 ) {
     begin_region_selection(window, sender, RegionPurpose::Screenshot, cancellation);
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn start_screenshot(
+    window: &AppWindow,
+    sender: Sender<Job>,
+    cancellation: Arc<UploadCancellation>,
+) {
+    if window.get_busy() {
+        return;
+    }
+
+    if window.get_auto_upload_captures() {
+        if valid_window_lifetime(window).is_none() || valid_window_upload_target(window).is_none() {
+            return;
+        }
+    } else if !window.get_save_captures() {
+        present_error(
+            window,
+            FailureStage::Settings,
+            "Enable local capture copies or automatic capture uploads",
+        );
+
+        return;
+    }
+
+    let settings = (|| {
+        let naming = views::settings::naming_from_window(window)?;
+        let filename_stem = crate::naming::screenshot_stem(&naming)?;
+        let save_directory = views::settings::configured_capture_directory(window)?;
+
+        Ok::<_, anyhow::Error>((filename_stem, save_directory))
+    })();
+    let (filename_stem, save_directory) = match settings {
+        Ok(settings) => settings,
+
+        Err(error) => {
+            present_error(window, FailureStage::Settings, &format!("{error:#}"));
+
+            return;
+        }
+    };
+    let restore_window = window.window().is_visible() && !window.window().is_minimized();
+
+    clear_last_receipt(window);
+    window.set_busy(true);
+    window.set_status_text("Select a region".into());
+    window.set_status_detail(
+        "Click a window, press Space to drag a region, or press Esc to cancel".into(),
+    );
+    let _ = window.hide();
+    let main_window = window.as_weak();
+
+    slint::Timer::single_shot(CAPTURE_HIDE_DELAY, move || {
+        let event_window = main_window.clone();
+        let event_sender = sender.clone();
+        let event_cancellation = Arc::clone(&cancellation);
+        let spawn_result = std::thread::Builder::new()
+            .name("sharer-macos-capture".to_owned())
+            .spawn(move || {
+                let result = native_macos_screenshot();
+
+                let _ = slint::invoke_from_event_loop(move || {
+                    let Some(window) = event_window.upgrade() else {
+                        return;
+                    };
+
+                    match result {
+                        Ok(Some(mut payload)) => {
+                            payload.filename =
+                                capture::named_capture_filename(&filename_stem, &payload.filename);
+                            window.set_busy(false);
+                            restore_window_if_needed(&window, restore_window);
+                            super::queue_capture_job(
+                                &window,
+                                &event_sender,
+                                JobSource::Prepared {
+                                    payload,
+                                    save_directory,
+                                },
+                                event_cancellation,
+                            );
+                        }
+
+                        Ok(None) => {
+                            window.set_busy(false);
+                            window.set_status_text("Ready".into());
+                            window.set_status_detail("Region selection cancelled".into());
+                            restore_window_if_needed(&window, restore_window);
+                        }
+
+                        Err(error) => {
+                            restore_window_if_needed(&window, restore_window);
+                            present_error(&window, FailureStage::Capture, &format!("{error:#}"));
+                        }
+                    }
+                });
+            });
+
+        if let Err(error) = spawn_result {
+            if let Some(window) = main_window.upgrade() {
+                restore_window_if_needed(&window, restore_window);
+                present_error(
+                    &window,
+                    FailureStage::Capture,
+                    &format!("failed to start the macOS capture tool: {error}"),
+                );
+            }
+        }
+    });
+}
+
+#[cfg(target_os = "macos")]
+fn native_macos_screenshot() -> Result<Option<UploadPayload>> {
+    let directory = tempfile::Builder::new()
+        .prefix("sharer-capture-")
+        .tempdir()
+        .context("failed to create a temporary capture directory")?;
+    let path = directory.path().join("capture.png");
+    let output = Command::new("/usr/sbin/screencapture")
+        .args(["-i", "-W", "-x", "-T", "0", "-t", "png"])
+        .arg(&path)
+        .output()
+        .context("failed to launch the macOS capture tool")?;
+
+    if path.is_file() {
+        let bytes =
+            std::fs::read(&path).context("failed to read the screenshot produced by macOS")?;
+        anyhow::ensure!(!bytes.is_empty(), "macOS produced an empty screenshot");
+
+        return Ok(Some(UploadPayload::from_bytes(
+            bytes,
+            "capture.png".to_owned(),
+            "image/png".to_owned(),
+        )));
+    }
+
+    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+
+    if message.is_empty() {
+        Ok(None)
+    } else {
+        anyhow::bail!("macOS capture failed: {message}")
+    }
 }
 
 fn begin_region_selection(
@@ -424,23 +577,23 @@ fn stabilize_selector_on_monitor(
 fn wire_region_hover(selector: &RegionWindow, screen: Rc<capture::CapturedScreen>) {
     let selector_weak = selector.as_weak();
     let last_snap = Cell::new(None);
-    let (screen_width, screen_height) = screen.selector_dimensions();
-
     selector
         .window()
-        .on_winit_window_event(move |_window, event| {
+        .on_winit_window_event(move |slint_window, event| {
             let Some(selector) = selector_weak.upgrade() else {
                 return slint::winit_030::EventResult::Propagate;
             };
 
             match event {
                 slint::winit_030::winit::event::WindowEvent::CursorMoved { position, .. } => {
-                    if screen_width > 0 && screen_height > 0 {
+                    let overlay_size = slint_window.size();
+
+                    if overlay_size.width > 0 && overlay_size.height > 0 {
                         let point = [
-                            (position.x / f64::from(screen_width))
+                            (position.x / f64::from(overlay_size.width))
                                 .to_f32()
                                 .unwrap_or(0.0),
-                            (position.y / f64::from(screen_height))
+                            (position.y / f64::from(overlay_size.height))
                                 .to_f32()
                                 .unwrap_or(0.0),
                         ];
