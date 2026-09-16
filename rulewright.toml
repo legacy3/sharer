@@ -28,7 +28,7 @@ ignore = []
 
 [rules.rust_ambient_syscall]
 enabled = true
-ignore = []
+ignore = ["build.rs"]
 
 [rules.rust_ambiguous_unicode]
 enabled = true
@@ -520,7 +520,7 @@ ignore = []
 
 [rules.rust_println]
 enabled = true
-ignore = []
+ignore = ["build.rs"]
 
 [rules.rust_proc_macro_thin_shim]
 enabled = true

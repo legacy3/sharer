@@ -189,15 +189,12 @@ fn native_macos_screenshot() -> Result<Option<UploadPayload>> {
         .context("failed to launch the macOS capture tool")?;
 
     if path.is_file() {
-        let bytes =
-            std::fs::read(&path).context("failed to read the screenshot produced by macOS")?;
-        anyhow::ensure!(!bytes.is_empty(), "macOS produced an empty screenshot");
+        let payload = UploadPayload::from_generated_path(&path)
+            .context("failed to read the screenshot produced by macOS")?;
 
-        return Ok(Some(UploadPayload::from_bytes(
-            bytes,
-            "capture.png".to_owned(),
-            "image/png".to_owned(),
-        )));
+        anyhow::ensure!(!payload.is_empty(), "macOS produced an empty screenshot");
+
+        return Ok(Some(payload));
     }
 
     let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
@@ -575,6 +572,7 @@ fn stabilize_selector_on_monitor(
 fn wire_region_hover(selector: &RegionWindow, screen: Rc<capture::CapturedScreen>) {
     let selector_weak = selector.as_weak();
     let last_snap = Cell::new(None);
+
     selector
         .window()
         .on_winit_window_event(move |slint_window, event| {

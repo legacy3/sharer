@@ -292,6 +292,28 @@ impl UploadPayload {
         })
     }
 
+    /// Load a generated capture from a temporary file into memory.
+    ///
+    /// The returned payload can be saved after its temporary source file is removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the path cannot be read or its size cannot fit in memory.
+    pub fn from_generated_path(path: &Path) -> Result<Self> {
+        let mut payload = Self::from_path(path)?;
+        let capacity = usize::try_from(payload.len()).context("generated capture is too large")?;
+        let PayloadBody::File { file, .. } = &mut payload.body else {
+            unreachable!("from_path always creates a file-backed payload");
+        };
+        let mut bytes = Vec::with_capacity(capacity);
+
+        file.read_to_end(&mut bytes)
+            .context("failed to buffer generated capture")?;
+        payload.body = PayloadBody::Bytes(bytes);
+
+        Ok(payload)
+    }
+
     /// Remove EXIF chunks from JPEG, PNG, and WebP payloads without recompressing pixels.
     ///
     /// File-backed images remain streamed when they do not contain EXIF metadata.

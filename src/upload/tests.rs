@@ -252,6 +252,25 @@ fn generated_copies_never_replace_an_existing_capture() {
 }
 
 #[test]
+fn generated_file_payload_can_be_stored_after_its_source_is_removed() {
+    let source_directory = tempfile::tempdir().unwrap();
+    let source = source_directory.path().join("capture.png");
+
+    std::fs::write(&source, [1, 2, 3]).unwrap();
+
+    let mut payload = UploadPayload::from_generated_path(&source).unwrap();
+
+    drop(source_directory);
+
+    let output_directory = tempfile::tempdir().unwrap();
+    let output = payload
+        .save_generated_copy(output_directory.path())
+        .unwrap();
+
+    assert_eq!(std::fs::read(output).unwrap(), [1, 2, 3]);
+}
+
+#[test]
 fn generated_reader_is_rewound_after_each_local_copy() {
     let directory = tempfile::tempdir().unwrap();
     let mut payload = UploadPayload::from_reader(
