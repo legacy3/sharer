@@ -1,6 +1,7 @@
 import { Icons, Theme } from "../theme.slint";
 import { AppScrollView, Badge, CompactField, CompactSelect, FlatButton, InlineNotice, NumberStepper, PageHeading, PageSubtitle, SectionHeading, SelectableButton, SettingGroup, SettingRow, SettingsCard, ToggleRow } from "../components.slint";
 import { ProviderPicker } from "../provider-picker.slint";
+import { LitterboxRetentionPicker } from "../retention-picker.slint";
 
 component SettingsPane inherits AppScrollView {
     VerticalLayout {
@@ -168,6 +169,7 @@ export component SettingsView inherits Rectangle {
     in-out property <string> upload-header-name;
     in-out property <string> upload-header-value;
     in-out property <int> lifetime-seconds: 86400;
+    in-out property <int> litterbox-retention: 3;
     in-out property <bool> save-captures: true;
     in-out property <bool> auto-upload-captures: true;
     in-out property <bool> force-sdr-captures: false;
@@ -675,6 +677,12 @@ export component SettingsView inherits Rectangle {
                             show-local: false;
                             chosen(index) => { root.uploader-kind = index; }
                         }
+                        if root.uploader-kind == 3: SettingsCard {
+                            LitterboxRetentionPicker {
+                                selected-retention <=> root.litterbox-retention;
+                                enabled: !root.busy;
+                            }
+                        }
                         if root.uploader-kind == 0 || (root.uploader-kind >= 4 && root.uploader-kind <= 6): HorizontalLayout {
                             spacing: 10px;
                             cross-axis-alignment: center;
@@ -800,7 +808,7 @@ export component SettingsView inherits Rectangle {
                             }
                         }
                         Text {
-                            text: "Public services set their own retention limits. The optional expiry request applies only to a custom server.";
+                            text: "Public services set their own limits. Litterbox offers fixed durations; custom servers accept an optional expiry request.";
                             color: Theme.text-muted;
                             font-size: 12px;
                             wrap: word-wrap;

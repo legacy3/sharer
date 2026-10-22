@@ -16,7 +16,7 @@ use sharer::{
         capture_directory_needs_default, capture_directory_or_default, default_capture_directory,
         ensure_capture_directory,
     },
-    upload::{UploadTarget, UploaderKind, canonical_uploader_endpoint},
+    upload::{LitterboxRetention, UploadTarget, UploaderKind, canonical_uploader_endpoint},
     validate_lifetime, validate_recording_fps, validate_recording_gib, validate_recording_seconds,
 };
 
@@ -34,6 +34,7 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
             .collect::<Vec<_>>(),
     )));
     window.set_lifetime_seconds(config.lifetime_seconds.cast_signed());
+    window.set_litterbox_retention(config.litterbox_retention.index());
     window.set_recording_fps(config.recording_fps.cast_signed());
     window.set_recording_max_seconds(config.recording_max_seconds.cast_signed());
     window.set_recording_max_gib(config.recording_max_gib.cast_signed());
@@ -101,6 +102,8 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
                     sharer::config::display_lifetime(config.lifetime_seconds)
                 )
             }
+        } else if config.uploader_kind == UploaderKind::Litterbox {
+            config.litterbox_retention.description().to_owned()
         } else {
             format!("Retention managed by {}", config.uploader_kind.name())
         };
@@ -148,6 +151,7 @@ pub(crate) fn initialize_wizard(window: &AppWindow, config: &AppConfig, reset: b
             .into(),
     );
     window.set_wizard_lifetime_seconds(config.lifetime_seconds.cast_signed());
+    window.set_wizard_litterbox_retention(config.litterbox_retention.index());
     window.set_wizard_save_captures(config.behavior.save_captures);
     window.set_wizard_capture_directory(config.capture_directory.clone().into());
 }
@@ -199,6 +203,12 @@ pub(crate) fn wizard_config_from_window(
                 validate_lifetime(next.lifetime_seconds)?;
             }
 
+            UploaderKind::Litterbox => {
+                next.litterbox_retention =
+                    LitterboxRetention::from_index(window.get_wizard_litterbox_retention())
+                        .context("choose a supported Litterbox retention")?;
+            }
+
             UploaderKind::Imgur => {
                 window
                     .get_wizard_imgur_credential()
@@ -222,7 +232,6 @@ pub(crate) fn wizard_config_from_window(
 
             UploaderKind::Uguu
             | UploaderKind::Catbox
-            | UploaderKind::Litterbox
             | UploaderKind::Vgy
             | UploaderKind::TransferSh => {}
         }
@@ -368,6 +377,7 @@ fn upload_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
         || window.get_upload_header_endpoint().as_str()
             != saved.upload_header_endpoint.as_deref().unwrap_or_default()
         || window.get_lifetime_seconds() != saved.lifetime_seconds.cast_signed()
+        || window.get_litterbox_retention() != saved.litterbox_retention.index()
 }
 
 fn capture_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
@@ -452,6 +462,7 @@ pub(crate) fn config_from_window(window: &AppWindow) -> Result<AppConfig> {
         upload_header_value: uploader.header_value,
         upload_header_endpoint: Some(uploader.header_endpoint),
         lifetime_seconds,
+        litterbox_retention: uploader.litterbox_retention,
         recording_fps: validated_recording_fps(window)?,
         recording_max_seconds: validated_recording_seconds(window)?,
         recording_max_gib: validated_recording_gib(window)?,
@@ -492,6 +503,8 @@ fn upload_target_values_from_window(window: &AppWindow) -> Result<UploadTarget> 
         .context("invalid uploader provider")?;
     let target = UploadTarget {
         kind,
+        litterbox_retention: LitterboxRetention::from_index(window.get_litterbox_retention())
+            .context("choose a supported Litterbox retention")?,
         custom_url: window.get_uploader_url().trim().to_owned(),
         credential: match kind {
             UploaderKind::Imgur => window.get_imgur_credential(),

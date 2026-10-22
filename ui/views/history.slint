@@ -364,7 +364,7 @@ export component HistoryView inherits Rectangle {
                         SortableHeading { horizontal-stretch: 1; label: "File"; column: 0; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
                         SortableHeading { horizontal-stretch: 1; label: "Date"; column: 1; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
                         SortableHeading { horizontal-stretch: 1; label: "Size"; column: 2; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        SortableHeading { horizontal-stretch: 1; label: "Expires"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
+                        SortableHeading { horizontal-stretch: 1; label: "Retention"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
                     }
                 }
 
@@ -381,8 +381,8 @@ export component HistoryView inherits Rectangle {
                         if !root.narrow: SortableHeading { width: root.file-column-width; label: "File"; column: 0; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
                         if !root.narrow: SortableHeading { width: root.date-column-width; label: "Date"; column: 1; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
                         if !root.narrow: SortableHeading { width: root.size-column-width; label: "Size"; column: 2; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        if root.narrow: TableHeading { horizontal-stretch: 1; text: "Expires"; }
-                        if !root.narrow: SortableHeading { horizontal-stretch: 1; label: "Expires"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
+                        if root.narrow: TableHeading { horizontal-stretch: 1; text: "Retention"; }
+                        if !root.narrow: SortableHeading { horizontal-stretch: 1; label: "Retention"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
                         TableHeading { width: 108px; text: "Actions"; horizontal-alignment: center; }
                     }
                 }

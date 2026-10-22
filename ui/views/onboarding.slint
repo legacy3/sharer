@@ -1,6 +1,7 @@
 import { Theme } from "../theme.slint";
 import { AppScrollView, CompactField, FlatButton, IconBox, SelectableButton, ToggleRow } from "../components.slint";
 import { ProviderPicker } from "../provider-picker.slint";
+import { LitterboxRetentionPicker } from "../retention-picker.slint";
 
 export component OnboardingView inherits Rectangle {
     in-out property <int> step: 0;
@@ -15,6 +16,7 @@ export component OnboardingView inherits Rectangle {
     in-out property <string> wizard-header-name;
     in-out property <string> wizard-header-value;
     in-out property <int> wizard-lifetime-seconds: 86400;
+    in-out property <int> wizard-litterbox-retention: 3;
     in-out property <string> error;
     in property <bool> replay: false;
     in property <bool> resetting: false;
@@ -31,6 +33,7 @@ export component OnboardingView inherits Rectangle {
     property <bool> compact: root.height < 560px;
     property <bool> local-only: root.wizard-provider == -1;
     property <string> destination-name: root.wizard-provider == 1 ? "Uguu" : root.wizard-provider == 2 ? "Catbox" : root.wizard-provider == 3 ? "Litterbox" : root.wizard-provider == 4 ? "Imgur" : root.wizard-provider == 5 ? "Pixeldrain" : root.wizard-provider == 6 ? "s-ul" : root.wizard-provider == 0 ? "Custom server" : "Local only";
+    property <string> destination-summary: root.destination-name + (root.wizard-provider == 3 ? " · " + (root.wizard-litterbox-retention == 0 ? "1 hour" : root.wizard-litterbox-retention == 1 ? "12 hours" : root.wizard-litterbox-retention == 2 ? "24 hours" : "72 hours") + " retention" : "");
     property <string> local-copies: (root.save-captures || root.local-only || !root.wizard-auto-upload) ? "On — " + (root.capture-directory == "" ? "Pictures/ShareR" : root.capture-directory) : "Off";
 
     background: #06090bf2;
@@ -100,6 +103,9 @@ export component OnboardingView inherits Rectangle {
                             root.wizard-auto-upload = index != -1;
                             root.error = "";
                         }
+                    }
+                    if root.wizard-provider == 3: LitterboxRetentionPicker {
+                        selected-retention <=> root.wizard-litterbox-retention;
                     }
                     if root.wizard-provider >= 4 && root.wizard-provider <= 6: VerticalLayout {
                         spacing: 6px;
@@ -221,7 +227,7 @@ export component OnboardingView inherits Rectangle {
                     Text { text: root.resetting ? "Finish to reset other preferences and apply these choices. Cancel keeps all saved settings." : "Finish to save these choices. You can change them later in Settings."; color: Theme.text-soft; font-size: 13px; wrap: word-wrap; }
 
                     if root.compact: Text {
-                        text: root.destination-name + " · Automatic upload " + (root.local-only ? "off" : (root.wizard-auto-upload ? "on" : "off")) + " · Local copies: " + root.local-copies;
+                        text: root.destination-summary + " · Automatic upload " + (root.local-only ? "off" : (root.wizard-auto-upload ? "on" : "off")) + " · Local copies: " + root.local-copies;
                         color: Theme.text-muted;
                         font-size: 12px;
                         wrap: word-wrap;
@@ -246,7 +252,7 @@ export component OnboardingView inherits Rectangle {
                             spacing: 8px;
 
                             Text { text: "Destination"; color: Theme.text-muted; font-size: 12px; }
-                            Text { text: root.destination-name; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; }
+                            Text { text: root.destination-summary; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; }
                             Text { text: "Automatic upload"; color: Theme.text-muted; font-size: 12px; }
                             Text { text: root.local-only ? "Off" : (root.wizard-auto-upload ? "On" : "Off"); color: Theme.text; font-size: 13px; font-weight: 600; }
                             Text { text: "Local copies"; color: Theme.text-muted; font-size: 12px; }

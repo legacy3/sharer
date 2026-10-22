@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     DEFAULT_RECORDING_GIB, DEFAULT_RECORDING_SECONDS, MAX_LIFETIME_SECONDS, MAX_RECORDING_GIB,
     storage::Storage,
-    upload::{UploadTarget, UploaderKind, canonical_uploader_endpoint},
+    upload::{LitterboxRetention, UploadTarget, UploaderKind, canonical_uploader_endpoint},
     validate_lifetime, validate_recording_fps, validate_recording_gib, validate_recording_seconds,
 };
 
@@ -31,6 +31,8 @@ pub struct AppConfig {
     pub upload_header_endpoint: Option<String>,
     /// Requested custom-uploader lifetime; zero leaves retention to the server.
     pub lifetime_seconds: u32,
+    /// Litterbox retention is separate from the custom-server lifetime.
+    pub litterbox_retention: LitterboxRetention,
     pub recording_fps: u32,
     pub recording_max_seconds: u32,
     pub recording_max_gib: u32,
@@ -451,6 +453,7 @@ impl AppConfig {
     pub fn upload_target_for(&self, kind: UploaderKind) -> UploadTarget {
         UploadTarget {
             kind,
+            litterbox_retention: self.litterbox_retention,
             custom_url: self.uploader_url.clone(),
             credential: self.uploader_credentials.for_provider(kind).to_owned(),
             header_name: self.upload_header_name.clone(),
@@ -470,6 +473,7 @@ impl Default for AppConfig {
             upload_header_value: String::new(),
             upload_header_endpoint: Some(String::new()),
             lifetime_seconds: DEFAULT_LIFETIME_SECONDS,
+            litterbox_retention: LitterboxRetention::default(),
             recording_fps: DEFAULT_RECORDING_FPS,
             recording_max_seconds: DEFAULT_RECORDING_SECONDS,
             recording_max_gib: DEFAULT_RECORDING_GIB,
@@ -511,6 +515,7 @@ impl fmt::Debug for AppConfig {
                     .is_some_and(|endpoint| !endpoint.is_empty()),
             )
             .field("lifetime_seconds", &self.lifetime_seconds)
+            .field("litterbox_retention", &self.litterbox_retention)
             .field("recording_fps", &self.recording_fps)
             .field("recording_max_seconds", &self.recording_max_seconds)
             .field("recording_max_gib", &self.recording_max_gib)

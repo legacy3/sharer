@@ -1474,6 +1474,8 @@ fn upload_status_detail(target: &UploadTarget, lifetime_seconds: u32) -> String 
                 display_lifetime(lifetime_seconds)
             )
         }
+    } else if target.kind == sharer::upload::UploaderKind::Litterbox {
+        target.litterbox_retention.description().to_owned()
     } else {
         format!("Retention managed by {}", target.kind.name())
     }

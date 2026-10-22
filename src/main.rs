@@ -355,6 +355,7 @@ fn apply_cli_upload_overrides(target: &mut UploadTarget, cli: &Cli) -> Result<()
 
 fn apply_upload_target(config: &mut AppConfig, target: UploadTarget) {
     config.uploader_kind = target.kind;
+    config.litterbox_retention = target.litterbox_retention;
     config.uploader_url = target.custom_url;
     config
         .uploader_credentials

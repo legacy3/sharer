@@ -1554,6 +1554,7 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
             clipboard: String::new(),
         },
         lifetime_seconds: 90,
+        litterbox_retention: sharer::upload::LitterboxRetention::TwelveHours,
         ..AppConfig::default()
     };
 
@@ -1577,6 +1578,8 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
 
     window.invoke_onboarding_restart();
     assert!(window.get_show_onboarding());
+    window.set_wizard_provider(UploaderKind::Litterbox.index());
+    window.set_wizard_litterbox_retention(0);
     window.set_wizard_provider(-1);
     window.set_wizard_start_at_login(true);
     window.set_wizard_imgur_credential("unsaved-key".into());
@@ -1586,6 +1589,7 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
     assert_eq!(storage.read("application").unwrap(), saved_bytes);
     assert_eq!(window.get_imgur_credential().as_str(), "fake-imgur-id");
     assert!(!window.get_start_at_login());
+    assert_eq!(window.get_litterbox_retention(), 1);
 
     window.invoke_onboarding_restart();
     window.set_wizard_uploader_url("not a URL".into());
@@ -1615,6 +1619,7 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
     assert_eq!(committed.upload_header_value, "fake-new-key");
     assert_eq!(committed.uploader_credentials, saved.uploader_credentials);
     assert_eq!(committed.lifetime_seconds, 90);
+    assert_eq!(committed.litterbox_retention, saved.litterbox_retention);
     assert!(!committed.behavior.completion_sound);
 }
 
@@ -1854,4 +1859,175 @@ fn wizard_custom_headers_require_explicit_authorization_for_a_new_endpoint() {
     );
     assert_eq!(authorized.upload_header_value, "fake-new-key");
     assert_eq!(saved.upload_header_value, "fake-saved-key");
+}
+
+#[test]
+fn litterbox_settings_preserve_custom_expiry_and_queue_the_selected_retention() {
+    use crate::views::settings;
+    use sharer::{config::AppConfig, upload::LitterboxRetention};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let directory = tempfile::tempdir().unwrap();
+
+    for seconds in [0, 90] {
+        let window = AppWindow::new().unwrap();
+        let mut saved = AppConfig {
+            uploader_kind: UploaderKind::Litterbox,
+            lifetime_seconds: seconds,
+            capture_directory: directory.path().to_string_lossy().into_owned(),
+            ..AppConfig::default()
+        };
+
+        saved.behavior.onboarding_complete = true;
+        settings::initialize(&window, &saved);
+        let saved_config = Rc::new(RefCell::new(saved));
+
+        settings::wire_dirty_callback(&window, &saved_config);
+        assert_eq!(window.get_litterbox_retention(), 3);
+        window.set_litterbox_retention(1);
+        window.invoke_settings_edited();
+        assert!(window.get_settings_dirty());
+        let selected = settings::config_from_window(&window).unwrap();
+
+        assert_eq!(selected.lifetime_seconds, seconds);
+        assert_eq!(
+            selected.litterbox_retention,
+            LitterboxRetention::TwelveHours
+        );
+        *saved_config.borrow_mut() = selected.clone();
+        settings::initialize(&window, &selected);
+        assert!(!window.get_settings_dirty());
+        assert_eq!(window.get_litterbox_retention(), 1);
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        super::queue_job(
+            &window,
+            &sender,
+            JobSource::Clipboard,
+            Arc::new(UploadCancellation::default()),
+        );
+        let upload = receiver.try_recv().unwrap().upload.unwrap();
+
+        assert_eq!(
+            upload.uploader.litterbox_retention,
+            LitterboxRetention::TwelveHours
+        );
+        assert_eq!(upload.lifetime_seconds, seconds);
+        assert_eq!(window.get_status_detail().as_str(), "12 hours (requested)");
+    }
+}
+
+#[test]
+fn litterbox_wizard_changes_only_its_own_retention_when_selected() {
+    use crate::views::settings;
+    use sharer::{config::AppConfig, upload::LitterboxRetention};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut saved = AppConfig {
+        uploader_kind: UploaderKind::Litterbox,
+        lifetime_seconds: 90,
+        litterbox_retention: LitterboxRetention::TwelveHours,
+        capture_directory: directory.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+
+    saved.behavior.onboarding_complete = true;
+    settings::initialize_wizard(&window, &saved, false);
+    assert_eq!(window.get_wizard_litterbox_retention(), 1);
+    window.set_wizard_litterbox_retention(0);
+    let applied = settings::wizard_config_from_window(&window, &saved).unwrap();
+
+    assert_eq!(applied.litterbox_retention, LitterboxRetention::OneHour);
+    assert_eq!(applied.lifetime_seconds, 90);
+    assert_eq!(saved.litterbox_retention, LitterboxRetention::TwelveHours);
+
+    for provider in [-1, UploaderKind::Catbox.index()] {
+        window.set_wizard_provider(provider);
+        let other = settings::wizard_config_from_window(&window, &saved).unwrap();
+
+        assert_eq!(other.litterbox_retention, saved.litterbox_retention);
+        assert_eq!(other.lifetime_seconds, 90);
+    }
+
+    settings::initialize_wizard(&window, &saved, false);
+    window.set_wizard_litterbox_retention(4);
+    assert!(settings::wizard_config_from_window(&window, &saved).is_err());
+    let reset = settings::reset_preferences(&saved);
+
+    assert_eq!(
+        reset.litterbox_retention,
+        LitterboxRetention::SeventyTwoHours
+    );
+}
+
+#[test]
+fn litterbox_finish_save_and_discard_persist_only_confirmed_retention() {
+    use crate::views::settings;
+    use sharer::{config::AppConfig, storage::Storage as _, upload::LitterboxRetention};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Rc::new(PlatformStorage::open_in(directory.path()).unwrap());
+    let mut saved = AppConfig {
+        uploader_kind: UploaderKind::Litterbox,
+        lifetime_seconds: 90,
+        capture_directory: directory.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+
+    saved.behavior.onboarding_complete = true;
+    saved.save(storage.as_ref()).unwrap();
+    let config = Rc::new(RefCell::new(saved));
+    let hotkeys = Rc::new(RefCell::new(None));
+    let hotkey_status = Rc::new(RefCell::new(String::new()));
+
+    settings::initialize(&window, &config.borrow());
+    settings::wire_dirty_callback(&window, &config);
+    super::onboarding::wire_onboarding_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    super::preferences::wire_settings_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    window.invoke_onboarding_restart();
+    window.set_wizard_litterbox_retention(2);
+    window.invoke_onboarding_continue();
+    assert_eq!(window.get_onboarding_step(), 1);
+    window.invoke_onboarding_finish();
+    assert!(!window.get_show_onboarding());
+    let finished = AppConfig::load(storage.as_ref()).unwrap();
+
+    assert_eq!(
+        finished.litterbox_retention,
+        LitterboxRetention::TwentyFourHours
+    );
+    assert_eq!(finished.lifetime_seconds, 90);
+    assert_eq!(window.get_litterbox_retention(), 2);
+    let saved_bytes = storage.read("application").unwrap();
+
+    window.set_litterbox_retention(0);
+    window.invoke_settings_edited();
+    assert!(window.get_settings_dirty());
+    window.invoke_discard_settings();
+    assert_eq!(window.get_litterbox_retention(), 2);
+    assert_eq!(storage.read("application").unwrap(), saved_bytes);
+    window.set_litterbox_retention(1);
+    window.invoke_save_settings();
+    let applied = AppConfig::load(storage.as_ref()).unwrap();
+
+    assert_eq!(applied.litterbox_retention, LitterboxRetention::TwelveHours);
+    assert_eq!(applied.lifetime_seconds, 90);
+    assert_eq!(window.get_litterbox_retention(), 1);
+    assert!(!window.get_settings_dirty());
 }
