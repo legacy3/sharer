@@ -22,13 +22,34 @@ impl Provider for Uguu {
         _target: &UploadTarget,
         metadata: ResponseMetadata<'_>,
     ) -> Result<UploadReceipt> {
-        plain_receipt(body, metadata.filename, metadata.size_bytes, String::new())
+        let mut receipt =
+            plain_receipt(body, metadata.filename, metadata.size_bytes, String::new())?;
+
+        "3 hours (host policy)".clone_into(&mut receipt.expires_at);
+        Ok(receipt)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receipt_distinguishes_host_policy_from_a_confirmed_expiry() {
+        let receipt = Uguu::parse(
+            b"https://files.example.test/capture.png",
+            &UploadTarget::default(),
+            ResponseMetadata {
+                filename: "capture.png".to_owned(),
+                size_bytes: 42,
+                delete_header: "",
+            },
+        )
+        .unwrap();
+
+        assert_eq!(receipt.expires_at, "3 hours (host policy)");
+        assert!(receipt.delete_url.is_empty());
+    }
 
     #[test]
     fn endpoint_uses_the_current_upload_route() {

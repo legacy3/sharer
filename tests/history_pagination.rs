@@ -1,6 +1,7 @@
 use sharer::{
+    MAX_HISTORY_PAGE_SIZE,
     config::{AppConfig, CaptureNameMode},
-    history::{HistoryEntry, HistorySort, HistorySortColumn, SortDirection},
+    history::{HistoryEntry, HistoryFilter, HistorySort, HistorySortColumn, SortDirection},
     storage::{PlatformStorage, Storage as _},
 };
 
@@ -366,4 +367,495 @@ fn legacy_local_history_uses_the_file_timestamp() {
     let migrated = storage.history_page(0, 25).unwrap().remove(0);
 
     assert!(migrated.created_at > 0);
+}
+
+#[test]
+fn history_search_combines_visible_fields_with_upload_filters() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+    let entries = [
+        HistoryEntry {
+            filename: "Review notes.png".to_owned(),
+            link: String::new(),
+            local_path: "/captures/notes.png".to_owned(),
+            ..entry(1)
+        },
+        HistoryEntry {
+            filename: "remote.png".to_owned(),
+            link: "https://files.example/REVIEW/remote".to_owned(),
+            ..entry(2)
+        },
+        HistoryEntry {
+            filename: "path.png".to_owned(),
+            local_path: "/captures/reView/path.png".to_owned(),
+            ..entry(3)
+        },
+        HistoryEntry {
+            filename: "Review missing local file.png".to_owned(),
+            link: String::new(),
+            ..entry(4)
+        },
+        entry(5),
+    ];
+
+    for item in &entries {
+        storage.insert_history(item).unwrap();
+    }
+
+    for (filter, indices) in [
+        (HistoryFilter::All, vec![3, 2, 1, 0]),
+        (HistoryFilter::LocalOnly, vec![3, 0]),
+        (HistoryFilter::Uploaded, vec![2, 1]),
+    ] {
+        let matches = storage
+            .history_page_filtered(0, 25, HistorySort::default(), " \t rEvIeW \n", filter)
+            .unwrap();
+        let expected: Vec<_> = indices
+            .into_iter()
+            .map(|index| entries[index].filename.as_str())
+            .collect();
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|item| item.filename.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            storage
+                .history_count_filtered(" \t rEvIeW \n", filter)
+                .unwrap(),
+            u64::try_from(expected.len()).unwrap()
+        );
+    }
+
+    assert_eq!(storage.history_count().unwrap(), 5);
+    assert_eq!(
+        storage
+            .history_count_filtered("", HistoryFilter::LocalOnly)
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        storage
+            .history_count_filtered("", HistoryFilter::Uploaded)
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn history_search_treats_sql_wildcards_and_quotes_as_literal_text() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+    let filename = "100%_D'Angelo\\capture.png";
+
+    for name in [filename, "100percentXDangelo.png"] {
+        storage
+            .insert_history(&HistoryEntry {
+                filename: name.to_owned(),
+                ..entry(1)
+            })
+            .unwrap();
+    }
+
+    for query in ["%", "_", "'", "\\", "100%_d'angelo"] {
+        let matches = storage
+            .history_page_filtered(0, 25, HistorySort::default(), query, HistoryFilter::All)
+            .unwrap();
+
+        assert_eq!(matches.len(), 1, "query: {query}");
+        assert_eq!(matches[0].filename, filename);
+        assert_eq!(
+            storage
+                .history_count_filtered(query, HistoryFilter::All)
+                .unwrap(),
+            1
+        );
+    }
+
+    let injection = "x' OR 1=1 --";
+
+    assert!(
+        storage
+            .history_page_filtered(0, 25, HistorySort::default(), injection, HistoryFilter::All)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        storage
+            .history_count_filtered(injection, HistoryFilter::All)
+            .unwrap(),
+        0
+    );
+    assert_eq!(storage.history_count().unwrap(), 2);
+}
+
+#[test]
+fn history_search_does_not_match_delete_tokens_or_expiration_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+
+    storage
+        .insert_history(&HistoryEntry {
+            delete_url: "https://files.example/delete/private-delete-token".to_owned(),
+            expires_at: "provider-expiration-metadata".to_owned(),
+            ..entry(1)
+        })
+        .unwrap();
+
+    for query in ["private-delete-token", "provider-expiration-metadata"] {
+        assert!(
+            storage
+                .history_page_filtered(0, 25, HistorySort::default(), query, HistoryFilter::All)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            storage
+                .history_count_filtered(query, HistoryFilter::All)
+                .unwrap(),
+            0
+        );
+    }
+}
+
+#[test]
+fn blank_history_search_preserves_the_existing_page_and_count_results() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+
+    for index in 0..60 {
+        storage.insert_history(&entry(index)).unwrap();
+    }
+
+    for query in ["", " \t\r\n "] {
+        assert_eq!(
+            storage
+                .history_count_filtered(query, HistoryFilter::default())
+                .unwrap(),
+            storage.history_count().unwrap()
+        );
+
+        for offset in [0, 25, 50, 75] {
+            assert_eq!(
+                storage
+                    .history_page_filtered(
+                        offset,
+                        25,
+                        HistorySort::default(),
+                        query,
+                        HistoryFilter::default()
+                    )
+                    .unwrap(),
+                storage.history_page(offset, 25).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn filtered_history_pages_keep_ties_stable_for_every_sort_order() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+    let mut all_ids = Vec::new();
+    let mut local_ids = Vec::new();
+    let mut uploaded_ids = Vec::new();
+
+    for index in 0..61 {
+        let local_only = index % 2 == 0;
+        let id = storage
+            .insert_history(&HistoryEntry {
+                filename: "same-name.png".to_owned(),
+                local_path: "/captures/matching-query/same-name.png".to_owned(),
+                link: if local_only {
+                    String::new()
+                } else {
+                    "https://files.example/same".to_owned()
+                },
+                ..entry(1)
+            })
+            .unwrap();
+
+        all_ids.push(id);
+
+        if local_only {
+            local_ids.push(id);
+        } else {
+            uploaded_ids.push(id);
+        }
+    }
+
+    storage.insert_history(&entry(2)).unwrap();
+
+    for column in [
+        HistorySortColumn::Filename,
+        HistorySortColumn::CreatedAt,
+        HistorySortColumn::Size,
+        HistorySortColumn::ExpiresAt,
+    ] {
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            for (filter, ids) in [
+                (HistoryFilter::All, &all_ids),
+                (HistoryFilter::LocalOnly, &local_ids),
+                (HistoryFilter::Uploaded, &uploaded_ids),
+            ] {
+                let sort = HistorySort { column, direction };
+                let mut expected = ids.clone();
+                let mut actual = Vec::new();
+
+                if direction == SortDirection::Descending {
+                    expected.reverse();
+                }
+
+                assert_eq!(
+                    storage
+                        .history_count_filtered("matching-query", filter)
+                        .unwrap(),
+                    u64::try_from(expected.len()).unwrap()
+                );
+
+                for offset in (0..expected.len()).step_by(25) {
+                    let page = storage
+                        .history_page_filtered(offset, 25, sort, "matching-query", filter)
+                        .unwrap();
+
+                    assert_eq!(page.len(), 25.min(expected.len() - offset));
+                    actual.extend(page.into_iter().map(|item| item.id));
+                }
+
+                assert_eq!(actual, expected, "{sort:?}, {filter:?}");
+                assert!(
+                    storage
+                        .history_page_filtered(expected.len(), 25, sort, "matching-query", filter)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn filtered_history_rejects_invalid_page_bounds() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+
+    for limit in [0, MAX_HISTORY_PAGE_SIZE + 1, usize::MAX] {
+        assert!(
+            storage
+                .history_page_filtered(0, limit, HistorySort::default(), "", HistoryFilter::All)
+                .is_err()
+        );
+    }
+
+    if let Some(offset) = usize::try_from(i64::MAX)
+        .ok()
+        .and_then(|value| value.checked_add(1))
+    {
+        assert!(
+            storage
+                .history_page_filtered(offset, 25, HistorySort::default(), "", HistoryFilter::All)
+                .is_err()
+        );
+    }
+}
+
+fn insert_cursor_fixture(storage: &PlatformStorage) {
+    for index in 0..85 {
+        let names = [
+            "Alpha.png",
+            "alpha.PNG",
+            "bravo.png",
+            "CHARLIE.png",
+            "charlie.PNG",
+        ];
+        let expiration = match index % 4 {
+            0 => "",
+            1 | 2 => "2026-10-22T12:00:00Z",
+            _ => "2026-10-23T12:00:00Z",
+        };
+        let item = HistoryEntry {
+            filename: names[index % names.len()].to_owned(),
+            created_at: i64::try_from(index % 3).unwrap(),
+            size_bytes: u64::try_from(index % 3).unwrap(),
+            expires_at: expiration.to_owned(),
+            local_path: if index % 7 == 0 {
+                "/captures/unrelated/file.png".to_owned()
+            } else {
+                "/captures/needle/file.png".to_owned()
+            },
+            link: if index % 2 == 0 {
+                String::new()
+            } else {
+                "https://files.example/capture".to_owned()
+            },
+            ..entry(u64::try_from(index).unwrap())
+        };
+
+        storage.insert_history(&item).unwrap();
+    }
+}
+
+#[test]
+fn history_cursor_matches_every_sorted_archive_with_case_ties_and_missing_expiry() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+
+    insert_cursor_fixture(&storage);
+
+    for column in [
+        HistorySortColumn::Filename,
+        HistorySortColumn::CreatedAt,
+        HistorySortColumn::Size,
+        HistorySortColumn::ExpiresAt,
+    ] {
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            let sort = HistorySort { column, direction };
+
+            for filter in [
+                HistoryFilter::All,
+                HistoryFilter::LocalOnly,
+                HistoryFilter::Uploaded,
+            ] {
+                let expected = storage
+                    .history_page_filtered(0, MAX_HISTORY_PAGE_SIZE, sort, "needle", filter)
+                    .unwrap();
+                let mut actual = storage
+                    .history_page_filtered(0, 7, sort, "needle", filter)
+                    .unwrap();
+
+                while let Some(cursor) = actual.last() {
+                    let next = storage
+                        .history_page_filtered_after(7, sort, "needle", filter, cursor)
+                        .unwrap();
+
+                    assert!(next.len() <= 7);
+
+                    if next.is_empty() {
+                        break;
+                    }
+
+                    actual.extend(next);
+                    assert!(
+                        actual.len() <= expected.len(),
+                        "cursor repeated a page: {sort:?}"
+                    );
+                }
+
+                assert_eq!(actual, expected, "sort: {sort:?}, filter: {filter:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn history_cursor_keeps_remaining_matches_when_prior_paths_or_records_are_removed() {
+    for column in [
+        HistorySortColumn::Filename,
+        HistorySortColumn::CreatedAt,
+        HistorySortColumn::Size,
+        HistorySortColumn::ExpiresAt,
+    ] {
+        for direction in [SortDirection::Ascending, SortDirection::Descending] {
+            let directory = tempfile::tempdir().unwrap();
+            let storage = PlatformStorage::open_in(directory.path()).unwrap();
+            let sort = HistorySort { column, direction };
+
+            insert_cursor_fixture(&storage);
+
+            let expected = storage
+                .history_page_filtered(
+                    0,
+                    MAX_HISTORY_PAGE_SIZE,
+                    sort,
+                    "needle",
+                    HistoryFilter::LocalOnly,
+                )
+                .unwrap();
+            let first = storage
+                .history_page_filtered(0, 7, sort, "needle", HistoryFilter::LocalOnly)
+                .unwrap();
+            let cursor = first.last().unwrap().clone();
+
+            for item in &first {
+                storage.clear_history_local_path(item.id).unwrap();
+            }
+
+            storage.remove_history(cursor.id).unwrap();
+
+            let mut remaining = storage
+                .history_page_filtered_after(7, sort, "needle", HistoryFilter::LocalOnly, &cursor)
+                .unwrap();
+
+            while let Some(cursor) = remaining.last() {
+                let next = storage
+                    .history_page_filtered_after(
+                        7,
+                        sort,
+                        "needle",
+                        HistoryFilter::LocalOnly,
+                        cursor,
+                    )
+                    .unwrap();
+
+                if next.is_empty() {
+                    break;
+                }
+
+                remaining.extend(next);
+                assert!(remaining.len() <= expected.len());
+            }
+
+            assert_eq!(remaining, expected[7..], "sort: {sort:?}");
+            assert_eq!(
+                storage
+                    .history_count_filtered("needle", HistoryFilter::LocalOnly)
+                    .unwrap(),
+                u64::try_from(expected.len() - 7).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn history_cursor_rejects_invalid_limits_and_unrepresentable_sizes() {
+    let directory = tempfile::tempdir().unwrap();
+    let storage = PlatformStorage::open_in(directory.path()).unwrap();
+    let cursor = entry(1);
+
+    for limit in [0, MAX_HISTORY_PAGE_SIZE + 1, usize::MAX] {
+        assert!(
+            storage
+                .history_page_filtered_after(
+                    limit,
+                    HistorySort::default(),
+                    "",
+                    HistoryFilter::All,
+                    &cursor
+                )
+                .is_err()
+        );
+    }
+
+    let invalid_size = HistoryEntry {
+        size_bytes: u64::MAX,
+        ..cursor
+    };
+
+    assert!(
+        storage
+            .history_page_filtered_after(
+                25,
+                HistorySort {
+                    column: HistorySortColumn::Size,
+                    direction: SortDirection::Ascending
+                },
+                "",
+                HistoryFilter::All,
+                &invalid_size
+            )
+            .is_err()
+    );
 }

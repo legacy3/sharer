@@ -112,7 +112,7 @@ pub(super) fn receive_job_result(
 
         if was_recording && !window.get_uploading() {
             window.set_status_text("Finishing recording...".into());
-            window.set_status_detail("Saving the animated WebP".into());
+            window.set_status_detail("Saving the recording".into());
         }
 
         if restore_window {
@@ -133,20 +133,27 @@ pub(super) fn receive_job_result(
         *state.recording_stop.borrow_mut() = None;
         window.set_busy(false);
         window.set_uploading(false);
-        clear_last_receipt(window);
         let failure_status = stage.status();
 
         window.set_status_text(failure_status.into());
         window.set_status_detail(message.as_str().into());
-        *state.activity.borrow_mut() = Some(ActivitySnapshot {
-            entry_id: 0,
-            delete_url: String::new(),
-            detail: message,
-            history_saved: false,
-            link: String::new(),
-            local_path: String::new(),
-            status: failure_status.to_owned(),
-        });
+
+        if has_artifact(window) {
+            window.set_artifact_is_previous(true);
+        } else {
+            clear_last_receipt(window);
+            set_artifact_result_status(window, failure_status, &message);
+            *state.activity.borrow_mut() = Some(ActivitySnapshot {
+                entry_id: 0,
+                delete_url: String::new(),
+                detail: message,
+                history_saved: false,
+                link: String::new(),
+                local_path: String::new(),
+                status: failure_status.to_owned(),
+            });
+        }
+
         finish_pending_quit(state);
 
         return;
@@ -154,6 +161,7 @@ pub(super) fn receive_job_result(
 
     let upload = *upload;
 
+    clear_last_receipt(window);
     window.set_busy(false);
     window.set_recording(false);
     window.set_uploading(false);
@@ -187,6 +195,7 @@ pub(super) fn receive_job_result(
     refresh_history_after_insert(window, state, history_saved, status);
 
     window.set_status_detail(status.as_str().into());
+    set_artifact_result_status(window, status_text, status);
     *state.activity.borrow_mut() = Some(ActivitySnapshot {
         entry_id: entry.id,
         delete_url: entry.delete_url,
@@ -289,6 +298,7 @@ pub(super) fn refresh_history_after_insert(
 }
 
 pub(super) fn apply_activity(window: &AppWindow, activity: &ActivitySnapshot) {
+    set_artifact_result_status(window, &activity.status, &activity.detail);
     window.set_status_text(activity.status.as_str().into());
     window.set_status_detail(activity.detail.as_str().into());
     window.set_last_link(activity.link.as_str().into());
@@ -322,11 +332,14 @@ pub(super) fn invalidate_latest_local_path(
     entry_id: i64,
     path: &std::path::Path,
 ) -> bool {
-    let window_matches = std::path::Path::new(window.get_last_local_path().as_str()) == path;
+    let window_matches = !path.as_os_str().is_empty()
+        && std::path::Path::new(window.get_last_local_path().as_str()) == path;
     let activity_matches = invalidate_activity_local_path(activity, entry_id, path);
 
-    if window_matches || activity_matches {
+    if window_matches {
         window.set_last_local_path(String::new().into());
+        preview::clear(window);
+        set_artifact_action_status(window, "", false);
     }
 
     if window_matches {
@@ -334,6 +347,10 @@ pub(super) fn invalidate_latest_local_path(
 
         push_detail(&mut detail, "Local file no longer available");
         window.set_status_detail(detail.into());
+        let mut artifact_detail = window.get_artifact_status_detail().to_string();
+
+        push_detail(&mut artifact_detail, "Local file no longer available");
+        window.set_artifact_status_detail(artifact_detail.into());
     }
 
     window_matches || activity_matches
@@ -341,13 +358,12 @@ pub(super) fn invalidate_latest_local_path(
 
 pub(super) fn invalidate_activity_local_path(
     activity: &RefCell<Option<ActivitySnapshot>>,
-    entry_id: i64,
+    _entry_id: i64,
     path: &std::path::Path,
 ) -> bool {
     let mut activity = activity.borrow_mut();
     let matches = activity.as_ref().is_some_and(|snapshot| {
-        (entry_id != 0 && snapshot.entry_id == entry_id)
-            || std::path::Path::new(&snapshot.local_path) == path
+        !snapshot.local_path.is_empty() && std::path::Path::new(&snapshot.local_path) == path
     });
 
     if matches

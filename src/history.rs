@@ -51,6 +51,38 @@ pub struct HistorySort {
     pub direction: SortDirection,
 }
 
+/// Which stored capture receipts are visible in the history workspace.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HistoryFilter {
+    #[default]
+    All,
+    LocalOnly,
+    Uploaded,
+}
+
+impl HistoryFilter {
+    /// Convert the desktop filter selection to a database filter.
+    #[must_use]
+    pub const fn from_index(index: i32) -> Option<Self> {
+        match index {
+            0 => Some(Self::All),
+            1 => Some(Self::LocalOnly),
+            2 => Some(Self::Uploaded),
+            _ => None,
+        }
+    }
+
+    /// Convert this filter to the desktop selection and database parameter.
+    #[must_use]
+    pub const fn index(self) -> i32 {
+        match self {
+            Self::All => 0,
+            Self::LocalOnly => 1,
+            Self::Uploaded => 2,
+        }
+    }
+}
+
 /// One successful local capture or upload and its available actions.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct HistoryEntry {

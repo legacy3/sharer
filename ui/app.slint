@@ -6,13 +6,17 @@ import { HistoryView } from "views/history.slint";
 import { SettingsView } from "views/settings.slint";
 import { OnboardingView } from "views/onboarding.slint";
 import { FfmpegSetup } from "ffmpeg-setup.slint";
+import { ConfirmationDialog } from "confirmation.slint";
 import { RegionWindow } from "region.slint";
+import "../assets/fonts/IBMPlexSans-Regular.ttf";
+import "../assets/fonts/IBMPlexSans-SemiBold.ttf";
 
 export { HistoryRow, RegionWindow }
 
 export component AppWindow inherits Window {
     title: "ShareR";
     default-font-size: 14px;
+    default-font-family: "IBM Plex Sans";
     preferred-width: 920px;
     preferred-height: 620px;
     min-width: 640px;
@@ -39,12 +43,22 @@ export component AppWindow inherits Window {
     in-out property <bool> uploading: false;
     in-out property <float> upload-progress: 0;
     in-out property <int> lifetime-seconds: 86400;
+    in-out property <int> litterbox-retention: 3;
     in-out property <int> recording-fps: 30;
     in-out property <int> recording-max-seconds: 300;
     in-out property <int> recording-max-gib: 2;
     in-out property <bool> recording-mp4: false;
+    in-out property <bool> confirmation-visible: false;
+    in property <string> confirmation-title;
+    in property <string> confirmation-description;
+    in property <string> confirmation-target;
+    in property <string> confirmation-action-label;
+    callback confirmation-response(bool);
     in-out property <bool> ffmpeg-setup-visible: false;
     in-out property <bool> ffmpeg-downloading: false;
+    in-out property <bool> ffmpeg-download-available: true;
+    in-out property <bool> ffmpeg-cancelling: false;
+    in-out property <bool> ffmpeg-setup-failed: false;
     in-out property <float> ffmpeg-download-progress: 0;
     in-out property <string> ffmpeg-setup-message: "";
     in-out property <bool> save-captures: true;
@@ -69,6 +83,7 @@ export component AppWindow inherits Window {
     in-out property <int> capture-name-mode: 0;
     in-out property <string> capture-custom-name: "";
     in-out property <bool> require-tor: false;
+    in property <bool> force-require-proxy: false;
     in-out property <bool> completion-sound: true;
     in-out property <bool> copy-link-after-upload: true;
     in-out property <int> tray-click-action: 0;
@@ -81,12 +96,26 @@ export component AppWindow inherits Window {
     in-out property <string> last-local-path: "";
     in-out property <string> last-delete-url: "";
     in-out property <bool> last-delete-saved: false;
+    in-out property <image> artifact-preview;
+    in-out property <int> artifact-preview-state: 0;
+    in-out property <string> artifact-name: "";
+    in-out property <string> artifact-description: "";
+    in-out property <string> artifact-action-detail: "";
+    in-out property <bool> artifact-action-error: false;
+    in-out property <string> artifact-status-text: "";
+    in-out property <bool> artifact-is-previous: false;
+    in-out property <string> artifact-status-detail: "";
     in property <[HistoryRow]> history-rows;
     in property <string> history-page-label: "Page 1 of 1  -  0 items";
     in property <bool> history-has-previous: false;
     in property <bool> history-has-next: false;
     in-out property <int> history-sort-column: 1;
     in-out property <bool> history-sort-ascending: false;
+    in-out property <string> history-search-query: "";
+    in-out property <int> history-filter: 0;
+    in property <bool> history-checking: false;
+    in property <string> history-checking-detail: "";
+    in property <string> history-load-message: "";
     in-out property <bool> recording: false;
     in property <string> app-version: "";
     in-out property <bool> update-available: false;
@@ -95,6 +124,7 @@ export component AppWindow inherits Window {
     in-out property <string> update-status: "Checking for updates...";
 
     in-out property <bool> settings-dirty: false;
+    in-out property <bool> advanced-settings: false;
     in-out property <int> settings-section: 0;
     in-out property <int> shortcut-recording: 0;
 
@@ -103,8 +133,8 @@ export component AppWindow inherits Window {
     in-out property <bool> onboarding-reset: false;
     in-out property <int> onboarding-step: 0;
     in-out property <string> onboarding-error: "";
-    in-out property <int> wizard-provider: 1;
-    in-out property <bool> wizard-auto-upload: true;
+    in-out property <int> wizard-provider: -1;
+    in-out property <bool> wizard-auto-upload: false;
     in-out property <bool> wizard-sound: true;
     in-out property <bool> wizard-start-at-login: false;
     in-out property <string> wizard-imgur-credential: "";
@@ -115,23 +145,29 @@ export component AppWindow inherits Window {
     in-out property <string> wizard-header-value: "";
     in-out property <string> wizard-header-endpoint: "";
     in-out property <int> wizard-lifetime-seconds: 86400;
+    in-out property <int> wizard-litterbox-retention: 3;
     in-out property <bool> wizard-save-captures: true;
     in-out property <string> wizard-capture-directory: "";
 
-    property <bool> uploader-configured: root.uploader-kind == 0 ? root.uploader-url != "" : root.uploader-kind == 4 ? root.imgur-credential != "" : root.uploader-kind == 5 ? root.pixeldrain-credential != "" : root.uploader-kind == 6 ? root.sul-credential != "" : root.uploader-kind >= 1 && root.uploader-kind <= 3;
+    property <bool> compact-navigation: root.width < 800px;
+    property <length> page-inset: root.compact-navigation ? 16px : Theme.page-padding;
+
+    in property <bool> uploader-configured: false;
     property <bool> show-history-action-status: root.current-page == 1 && !root.busy && !root.uploading && !root.recording && root.history-action-detail != "";
+    property <bool> status-is-cancelled: root.status-text == "Upload cancelled"
+            || root.status-text == "Saved locally, upload cancelled"
+            || root.status-text == "FFmpeg setup cancelled";
     property <bool> status-is-error: root.status-text == "Upload failed"
-            || root.status-text == "Upload cancelled"
             || root.status-text == "Upload timed out"
             || root.status-text == "Saved locally, upload failed"
-            || root.status-text == "Saved locally, upload cancelled"
             || root.status-text == "Saved locally, upload timed out"
             || root.status-text == "Capture failed"
             || root.status-text == "Save failed"
             || root.status-text == "Settings invalid"
             || root.status-text == "Settings not saved"
             || root.status-text == "History action failed"
-            || root.status-text == "Setup required";
+            || root.status-text == "Setup required"
+            || root.status-text == "FFmpeg setup failed";
 
     in property <bool> presentation-ready: false;
     pure callback display-text(string) -> string;
@@ -153,6 +189,7 @@ export component AppWindow inherits Window {
     callback open-last-local();
     callback reveal-last-local();
     callback copy-last-file();
+    callback upload-last();
     callback open-history-link(string);
     callback copy-history-link(string);
     callback copy-history-delete(string);
@@ -167,10 +204,13 @@ export component AppWindow inherits Window {
     callback history-previous();
     callback history-next();
     callback history-sort-column-clicked(int);
+    callback history-query-changed(string, int);
+    callback history-cancel-check();
     callback open-update();
     callback save-settings();
     callback discard-settings();
     callback settings-edited();
+    callback settings-mode-changed(bool);
     callback custom-endpoint-edited();
     callback custom-header-edited();
     callback shortcut-recording-started();
@@ -191,7 +231,23 @@ export component AppWindow inherits Window {
     }
 
     changed show-onboarding => {
-        if !root.show-onboarding {
+        if !root.show-onboarding && !root.confirmation-visible && !root.ffmpeg-setup-visible {
+            if root.current-page == 1 { history-navigation.focus(); }
+            else if root.current-page == 2 { settings-navigation.focus(); }
+            else { capture-navigation.focus(); }
+        }
+    }
+
+    changed confirmation-visible => {
+        if !root.confirmation-visible && !root.show-onboarding && !root.ffmpeg-setup-visible {
+            if root.current-page == 1 { history-navigation.focus(); }
+            else if root.current-page == 2 { settings-navigation.focus(); }
+            else { capture-navigation.focus(); }
+        }
+    }
+
+    changed ffmpeg-setup-visible => {
+        if !root.ffmpeg-setup-visible && !root.show-onboarding && !root.confirmation-visible {
             if root.current-page == 1 { history-navigation.focus(); }
             else if root.current-page == 2 { settings-navigation.focus(); }
             else { capture-navigation.focus(); }
@@ -208,6 +264,7 @@ export component AppWindow inherits Window {
     changed upload-header-value => { root.settings-edited(); }
     changed upload-header-endpoint => { root.settings-edited(); }
     changed lifetime-seconds => { root.settings-edited(); }
+    changed litterbox-retention => { root.settings-edited(); }
     changed recording-fps => { root.settings-edited(); }
     changed recording-max-seconds => { root.settings-edited(); }
     changed recording-max-gib => { root.settings-edited(); }
@@ -237,34 +294,38 @@ export component AppWindow inherits Window {
     // Hiding this subtree keeps setup's keyboard traversal and pointer input modal.
     // The view instances remain alive so replay preserves the underlying page state.
     Rectangle {
+        // Explicit placement keeps this responsive shell out of the window's
+        // intrinsic size calculation: it follows the window's chosen size.
+        x: 0px;
+        y: 0px;
         width: parent.width;
         height: parent.height;
-        visible: !root.show-onboarding;
+        visible: !root.show-onboarding && !root.ffmpeg-setup-visible && !root.confirmation-visible;
 
         HorizontalLayout {
             spacing: 0px;
 
             Rectangle {
-                width: 176px;
+                width: root.compact-navigation ? 64px : 160px;
                 background: Theme.sidebar;
 
                 VerticalLayout {
-                    padding: 12px;
+                    padding: root.compact-navigation ? 8px : 12px;
                     spacing: 6px;
 
                     HorizontalLayout {
                         height: 48px;
                         spacing: 9px;
-                        alignment: start;
+                        alignment: root.compact-navigation ? center : start;
 
                         IconBox { icon-source: root.app-icon; tint: transparent; icon-size: 32px; box-width: 32px; }
-                        Text { text: "ShareR"; color: Theme.text; font-size: 19px; font-weight: 600; vertical-alignment: center; }
+                        if !root.compact-navigation: Text { text: "ShareR"; color: Theme.text; font-size: 19px; font-weight: 600; vertical-alignment: center; }
                     }
 
                     Rectangle { height: 4px; background: transparent; }
-                    capture-navigation := NavButton { text: "Capture"; icon-source: Icons.capture; selected: root.current-page == 0; clicked => { root.current-page = 0; } }
-                    history-navigation := NavButton { text: "History"; icon-source: Icons.history; selected: root.current-page == 1; clicked => { root.current-page = 1; } }
-                    settings-navigation := NavButton { text: "Settings"; icon-source: Icons.settings; selected: root.current-page == 2; clicked => { root.current-page = 2; } }
+                    capture-navigation := NavButton { text: "Capture"; compact: root.compact-navigation; icon-source: Icons.capture; selected: root.current-page == 0; clicked => { root.current-page = 0; } }
+                    history-navigation := NavButton { text: "History"; compact: root.compact-navigation; icon-source: Icons.history; selected: root.current-page == 1; clicked => { root.current-page = 1; } }
+                    settings-navigation := NavButton { text: "Settings"; compact: root.compact-navigation; icon-source: Icons.settings; selected: root.current-page == 2; clicked => { root.current-page = 2; } }
 
                     Rectangle { vertical-stretch: 1; background: transparent; }
 
@@ -285,7 +346,7 @@ export component AppWindow inherits Window {
                         min-height: 0px;
 
                         if root.current-page == 0: CaptureView {
-                            x: 24px; y: 20px; width: parent.width - 48px; height: parent.height - 40px;
+                            x: root.page-inset; y: 20px; width: parent.width - 2 * root.page-inset; height: parent.height - 40px;
                             busy: root.busy;
                             settings-dirty: root.settings-dirty;
                             uploading: root.uploading;
@@ -293,6 +354,8 @@ export component AppWindow inherits Window {
                             recording: root.recording;
                             configured: root.uploader-configured;
                             auto-upload: root.auto-upload-captures;
+                            save-captures: root.save-captures;
+                            require-tor: root.require-tor || root.force-require-proxy;
                             uploader-name: root.uploader-name;
                             capture-enabled: root.save-captures || (root.auto-upload-captures && root.uploader-configured);
                             region-hotkey: root.region-hotkey-label;
@@ -305,6 +368,15 @@ export component AppWindow inherits Window {
                             last-local-path: root.presentation-ready ? root.display-text(root.last-local-path) : "";
                             last-delete-url: root.last-delete-url;
                             last-delete-saved: root.last-delete-saved;
+                            artifact-preview: root.artifact-preview;
+                            artifact-preview-state: root.artifact-preview-state;
+                            artifact-name: root.presentation-ready ? root.display-text(root.artifact-name) : "";
+                            artifact-description: root.presentation-ready ? root.display-text(root.artifact-description) : "";
+                            artifact-action-detail: root.presentation-ready ? root.display-text(root.artifact-action-detail) : "";
+                            artifact-action-error: root.artifact-action-error;
+                            artifact-status-text: root.presentation-ready ? root.display-text(root.artifact-status-text) : "";
+                            artifact-is-previous: root.artifact-is-previous;
+                            artifact-status-detail: root.presentation-ready ? root.display-text(root.artifact-status-detail) : "";
                             update-available: root.update-available;
                             update-version: root.presentation-ready ? root.display-text(root.update-version) : "";
                             capture-region => { root.capture-region(); }
@@ -320,6 +392,7 @@ export component AppWindow inherits Window {
                             open-local => { root.open-last-local(); }
                             reveal-local => { root.reveal-last-local(); }
                             copy-file => { root.copy-last-file(); }
+                            upload-last => { root.upload-last(); }
                             open-update => { root.open-update(); }
                             show-settings => {
                                 root.settings-section = 2;
@@ -337,7 +410,14 @@ export component AppWindow inherits Window {
                         }
 
                         if root.current-page == 1: HistoryView {
-                            x: 24px; y: 20px; width: parent.width - 48px; height: parent.height - 40px;
+                            x: root.page-inset; y: 20px; width: parent.width - 2 * root.page-inset; height: parent.height - 40px;
+                            search-query <=> root.history-search-query;
+                            filter <=> root.history-filter;
+                            query-changed(query, filter) => { root.history-query-changed(query, filter); }
+                            checking: root.history-checking;
+                            checking-detail: root.history-checking-detail;
+                            load-message: root.history-load-message;
+                            cancel-check => { root.history-cancel-check(); }
                             rows: root.history-rows;
                             page-label: root.history-page-label;
                             has-previous: root.history-has-previous;
@@ -345,6 +425,7 @@ export component AppWindow inherits Window {
                             sort-column: root.history-sort-column;
                             sort-ascending: root.history-sort-ascending;
                             upload-enabled: root.uploader-configured && !root.busy && !root.settings-dirty && !root.show-onboarding;
+                            upload-configured: root.uploader-configured;
                             upload-provider: root.uploader-name;
                             settings-dirty: root.settings-dirty;
                             open-link(action-token) => { root.open-history-link(action-token); }
@@ -356,6 +437,10 @@ export component AppWindow inherits Window {
                             upload-local(action-token) => { root.upload-history-local(action-token); }
                             copy-file(action-token) => { root.copy-history-file(action-token); }
                             copy-path(action-token) => { root.copy-history-path(action-token); }
+                            choose-upload-destination => {
+                                root.settings-section = 2;
+                                root.current-page = 2;
+                            }
                             show-settings => { root.current-page = 2; }
                             remove-entry(action-token) => { root.remove-history-entry(action-token); }
                             delete-local(action-token) => { root.delete-history-local(action-token); }
@@ -366,7 +451,9 @@ export component AppWindow inherits Window {
                         }
 
                         if root.current-page == 2: SettingsView {
-                            x: 24px; y: 20px; width: parent.width - 48px; height: parent.height - 40px;
+                            x: root.page-inset; y: 20px; width: parent.width - 2 * root.page-inset; height: parent.height - 40px;
+                            advanced-settings <=> root.advanced-settings;
+                            settings-mode-changed(advanced) => { root.settings-mode-changed(advanced); }
                             selected-section <=> root.settings-section;
                             busy: root.busy;
                             uploader-kind <=> root.uploader-kind;
@@ -382,6 +469,7 @@ export component AppWindow inherits Window {
                             custom-endpoint-edited => { root.custom-endpoint-edited(); }
                             custom-header-edited => { root.custom-header-edited(); }
                             lifetime-seconds <=> root.lifetime-seconds;
+                            litterbox-retention <=> root.litterbox-retention;
                             recording-fps <=> root.recording-fps;
                             recording-max-seconds <=> root.recording-max-seconds;
                             recording-max-gib <=> root.recording-max-gib;
@@ -405,6 +493,7 @@ export component AppWindow inherits Window {
                             capture-name-mode <=> root.capture-name-mode;
                             capture-custom-name <=> root.capture-custom-name;
                             require-tor <=> root.require-tor;
+                            force-require-proxy: root.force-require-proxy;
                             tray-click-action <=> root.tray-click-action;
                             configured: root.uploader-configured;
                             hotkey-status: root.hotkey-status;
@@ -431,23 +520,37 @@ export component AppWindow inherits Window {
                         detail: root.presentation-ready ? root.display-text(root.show-history-action-status ? root.history-action-detail : root.status-detail) : "";
                         busy: root.busy || root.uploading || root.recording;
                         error: root.show-history-action-status ? root.history-action-failed : root.status-is-error;
+                        neutral: !root.show-history-action-status && root.status-is-cancelled;
                     }
                 }
             }
         }
     }
 
+    if root.confirmation-visible: ConfirmationDialog {
+        width: parent.width;
+        height: parent.height;
+        title: root.confirmation-title;
+        description: root.confirmation-description;
+        target: root.confirmation-target;
+        action-label: root.confirmation-action-label;
+        response(confirmed) => { root.confirmation-response(confirmed); }
+    }
+
     if root.ffmpeg-setup-visible: FfmpegSetup {
         width: parent.width;
         height: parent.height;
         downloading: root.ffmpeg-downloading;
+        download-available: root.ffmpeg-download-available;
+        cancelling: root.ffmpeg-cancelling;
+        failed: root.ffmpeg-setup-failed;
         progress: root.ffmpeg-download-progress;
         message: root.ffmpeg-setup-message;
         download => { root.download-ffmpeg(); }
         cancel => { root.cancel-ffmpeg-setup(); }
     }
 
-    if root.show-onboarding: OnboardingView {
+    if root.show-onboarding && !root.confirmation-visible: OnboardingView {
         width: parent.width;
         height: parent.height;
         step <=> root.onboarding-step;
@@ -463,6 +566,7 @@ export component AppWindow inherits Window {
         wizard-header-name <=> root.wizard-header-name;
         wizard-header-value <=> root.wizard-header-value;
         wizard-lifetime-seconds <=> root.wizard-lifetime-seconds;
+        wizard-litterbox-retention <=> root.wizard-litterbox-retention;
         save-captures: root.wizard-save-captures;
         capture-directory: root.wizard-capture-directory;
         replay: root.onboarding-complete;

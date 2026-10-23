@@ -9,18 +9,19 @@ use crate::AppWindow;
 use sharer::{
     config::{
         AppConfig, BehaviorConfig, CaptureNameMode, CaptureNamingConfig, CaptureResolution,
-        PrivacyConfig, ProviderCredentials, RecordingFormat, ResizeQuality, ShortcutConfig,
-        TrayClickAction,
+        PrivacyConfig, ProviderCredentials, RecordingFormat, ResizeQuality, SettingsMode,
+        ShortcutConfig, TrayClickAction,
     },
     storage::{
         capture_directory_needs_default, capture_directory_or_default, default_capture_directory,
         ensure_capture_directory,
     },
-    upload::{UploadTarget, UploaderKind, canonical_uploader_endpoint},
+    upload::{LitterboxRetention, UploadTarget, UploaderKind, canonical_uploader_endpoint},
     validate_lifetime, validate_recording_fps, validate_recording_gib, validate_recording_seconds,
 };
 
 pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
+    window.set_advanced_settings(config.settings_mode == SettingsMode::Advanced);
     window.set_provider_names(slint::ModelRc::new(slint::VecModel::from(
         UploaderKind::AVAILABLE
             .iter()
@@ -34,6 +35,7 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
             .collect::<Vec<_>>(),
     )));
     window.set_lifetime_seconds(config.lifetime_seconds.cast_signed());
+    window.set_litterbox_retention(config.litterbox_retention.index());
     window.set_recording_fps(config.recording_fps.cast_signed());
     window.set_recording_max_seconds(config.recording_max_seconds.cast_signed());
     window.set_recording_max_gib(config.recording_max_gib.cast_signed());
@@ -80,6 +82,12 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
     initialize_wizard(window, config, false);
     window.set_show_onboarding(!config.behavior.onboarding_complete);
 
+    initialize_status(window, config);
+    refresh_uploader_readiness(window);
+    window.set_settings_dirty(false);
+}
+
+fn initialize_status(window: &AppWindow, config: &AppConfig) {
     if !config.behavior.onboarding_complete {
         window.set_status_text("Welcome to ShareR".into());
         window.set_status_detail("Choose where uploads go. You can change this later.".into());
@@ -101,6 +109,8 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
                     sharer::config::display_lifetime(config.lifetime_seconds)
                 )
             }
+        } else if config.uploader_kind == UploaderKind::Litterbox {
+            config.litterbox_retention.description().to_owned()
         } else {
             format!("Retention managed by {}", config.uploader_kind.name())
         };
@@ -118,20 +128,20 @@ pub(crate) fn initialize(window: &AppWindow, config: &AppConfig) {
             .into(),
         );
     }
-
-    window.set_settings_dirty(false);
 }
 
 pub(crate) fn initialize_wizard(window: &AppWindow, config: &AppConfig, reset: bool) {
+    let first_launch = !reset && !config.behavior.onboarding_complete;
+
     window.set_onboarding_reset(reset);
     window.set_onboarding_step(0);
     window.set_onboarding_error("".into());
-    window.set_wizard_provider(if config.behavior.auto_upload_captures {
+    window.set_wizard_provider(if !first_launch && config.behavior.auto_upload_captures {
         config.uploader_kind.index()
     } else {
         -1
     });
-    window.set_wizard_auto_upload(config.behavior.auto_upload_captures);
+    window.set_wizard_auto_upload(!first_launch && config.behavior.auto_upload_captures);
     window.set_wizard_sound(config.behavior.completion_sound);
     window.set_wizard_start_at_login(config.behavior.start_at_login);
     window.set_wizard_imgur_credential(config.uploader_credentials.imgur.clone().into());
@@ -148,7 +158,8 @@ pub(crate) fn initialize_wizard(window: &AppWindow, config: &AppConfig, reset: b
             .into(),
     );
     window.set_wizard_lifetime_seconds(config.lifetime_seconds.cast_signed());
-    window.set_wizard_save_captures(config.behavior.save_captures);
+    window.set_wizard_litterbox_retention(config.litterbox_retention.index());
+    window.set_wizard_save_captures(first_launch || config.behavior.save_captures);
     window.set_wizard_capture_directory(config.capture_directory.clone().into());
 }
 
@@ -199,6 +210,12 @@ pub(crate) fn wizard_config_from_window(
                 validate_lifetime(next.lifetime_seconds)?;
             }
 
+            UploaderKind::Litterbox => {
+                next.litterbox_retention =
+                    LitterboxRetention::from_index(window.get_wizard_litterbox_retention())
+                        .context("choose a supported Litterbox retention")?;
+            }
+
             UploaderKind::Imgur => {
                 window
                     .get_wizard_imgur_credential()
@@ -222,7 +239,6 @@ pub(crate) fn wizard_config_from_window(
 
             UploaderKind::Uguu
             | UploaderKind::Catbox
-            | UploaderKind::Litterbox
             | UploaderKind::Vgy
             | UploaderKind::TransferSh => {}
         }
@@ -344,9 +360,37 @@ pub(crate) fn wire_dirty_callback(window: &AppWindow, saved_config: &Rc<RefCell<
 
     window.on_settings_edited(move || {
         if let Some(window) = window_weak.upgrade() {
-            window.set_settings_dirty(settings_are_dirty(&window, &saved_config.borrow()));
+            let dirty = settings_are_dirty(&window, &saved_config.borrow());
+
+            refresh_uploader_readiness(&window);
+            window.set_settings_dirty(dirty);
+            refresh_draft_status(&window, dirty);
         }
     });
+}
+
+fn refresh_uploader_readiness(window: &AppWindow) {
+    window.set_uploader_configured(upload_target_from_window(window).is_ok());
+}
+
+fn refresh_draft_status(window: &AppWindow, dirty: bool) {
+    const DRAFT_DETAIL: &str =
+        "Save or discard your changes before starting another capture or upload";
+    const SAVED_DETAIL: &str = "Settings match the saved configuration";
+
+    let status = window.get_status_text();
+    let detail = window.get_status_detail();
+    let clean_settings_status = (status == "Ready"
+        && (detail == "Settings saved" || detail == SAVED_DETAIL))
+        || (status == "Changes discarded" && detail == SAVED_DETAIL);
+
+    if dirty && clean_settings_status {
+        window.set_status_text("Unsaved settings".into());
+        window.set_status_detail(DRAFT_DETAIL.into());
+    } else if !dirty && status == "Unsaved settings" && detail == DRAFT_DETAIL {
+        window.set_status_text("Ready".into());
+        window.set_status_detail(SAVED_DETAIL.into());
+    }
 }
 
 fn settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
@@ -368,6 +412,7 @@ fn upload_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
         || window.get_upload_header_endpoint().as_str()
             != saved.upload_header_endpoint.as_deref().unwrap_or_default()
         || window.get_lifetime_seconds() != saved.lifetime_seconds.cast_signed()
+        || window.get_litterbox_retention() != saved.litterbox_retention.index()
 }
 
 fn capture_settings_are_dirty(window: &AppWindow, saved: &AppConfig) -> bool {
@@ -440,6 +485,11 @@ pub(crate) fn config_from_window(window: &AppWindow) -> Result<AppConfig> {
         .context("invalid tray click action")?;
 
     Ok(AppConfig {
+        settings_mode: if window.get_advanced_settings() {
+            SettingsMode::Advanced
+        } else {
+            SettingsMode::Simple
+        },
         uploader_kind: uploader.kind,
         uploader_url: uploader.custom_url,
         uploader_credentials: ProviderCredentials {
@@ -452,6 +502,7 @@ pub(crate) fn config_from_window(window: &AppWindow) -> Result<AppConfig> {
         upload_header_value: uploader.header_value,
         upload_header_endpoint: Some(uploader.header_endpoint),
         lifetime_seconds,
+        litterbox_retention: uploader.litterbox_retention,
         recording_fps: validated_recording_fps(window)?,
         recording_max_seconds: validated_recording_seconds(window)?,
         recording_max_gib: validated_recording_gib(window)?,
@@ -492,6 +543,8 @@ fn upload_target_values_from_window(window: &AppWindow) -> Result<UploadTarget> 
         .context("invalid uploader provider")?;
     let target = UploadTarget {
         kind,
+        litterbox_retention: LitterboxRetention::from_index(window.get_litterbox_retention())
+            .context("choose a supported Litterbox retention")?,
         custom_url: window.get_uploader_url().trim().to_owned(),
         credential: match kind {
             UploaderKind::Imgur => window.get_imgur_credential(),

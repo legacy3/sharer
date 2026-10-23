@@ -181,3 +181,37 @@ fn managed_download_verifies_the_release_and_installs_a_working_encoder() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     validate_encoder(&executable, &AtomicBool::new(false)).unwrap();
 }
+
+#[test]
+fn cancelled_download_does_not_wait_for_a_running_blocking_resolver() {
+    let (started_sender, started_receiver) = std::sync::mpsc::channel();
+    let (release_sender, release_receiver) = std::sync::mpsc::channel();
+    let (result_sender, result_receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = run_download(async move {
+            let _resolver = tokio::task::spawn_blocking(move || {
+                started_sender.send(()).unwrap();
+                let _ = release_receiver.recv_timeout(Duration::from_secs(5));
+            });
+
+            started_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+            cancellable(std::future::pending::<()>(), &AtomicBool::new(true)).await
+        });
+
+        result_sender.send(result).unwrap();
+    });
+    let result = result_receiver.recv_timeout(Duration::from_secs(2));
+
+    // Release the synthetic DNS task even when a regression times out, so the
+    // test reports a failure instead of leaking a permanently blocked thread.
+    let _ = release_sender.send(());
+
+    worker.join().unwrap();
+    assert!(
+        result
+            .expect("cancellation must return before DNS completes")
+            .is_err()
+    );
+}

@@ -1,5 +1,5 @@
 import { Icons, Theme } from "../theme.slint";
-import { AppScrollView, FlatButton, IconButton, InlineNotice, PageHeading, PageSubtitle, SectionCard } from "../components.slint";
+import { AppScrollView, CompactField, FlatButton, IconButton, InlineNotice, PageHeading, PageSubtitle, SectionCard, SelectableButton, TooltipContent } from "../components.slint";
 import { HistoryRow } from "../models.slint";
 
 component TableHeading inherits Text {
@@ -20,8 +20,8 @@ component SortableHeading inherits Rectangle {
 
     background: heading-touch.has-hover ? Theme.surface-hover : transparent;
     border-radius: 4px;
-    border-width: heading-focus.has-focus ? 1px : 0px;
-    border-color: Theme.primary-bright;
+    border-width: heading-focus.has-focus ? 2px : 0px;
+    border-color: Theme.focus;
     forward-focus: heading-focus;
     accessible-role: button;
     accessible-label: root.label + (root.active-column == root.column ? (root.ascending ? ", sorted ascending" : ", sorted descending") : ", not sorted");
@@ -37,8 +37,6 @@ component SortableHeading inherits Rectangle {
         vertical-alignment: center;
         overflow: elide;
     }
-
-    Tooltip { text: @markdown("Sort by \{root.label}. Click again to reverse the order."); }
 
     heading-focus := FocusScope {
         width: root.width;
@@ -61,6 +59,8 @@ component SortableHeading inherits Rectangle {
             root.activate();
         }
     }
+
+    Tooltip { TooltipContent { text: "Sort by " + root.label + ". Click again to reverse the order."; } }
 }
 
 component TableCell inherits Text {
@@ -69,7 +69,7 @@ component TableCell inherits Text {
     vertical-alignment: center;
     overflow: elide;
 
-    Tooltip { text: @markdown("\{root.text}"); }
+    Tooltip { TooltipContent { text: root.text; } }
 }
 
 component HistoryActions inherits HorizontalLayout {
@@ -96,7 +96,8 @@ component HistoryActions inherits HorizontalLayout {
     callback upload-selected();
     upload-selected => {
         root.close-menus();
-        root.upload-local(root.selected-token);
+        if root.upload-configured { root.upload-local(root.selected-token); }
+        else { root.choose-upload-destination(); }
     }
     callback open-deletion-selected();
     open-deletion-selected => {
@@ -112,6 +113,7 @@ component HistoryActions inherits HorizontalLayout {
     in property <bool> has-remote;
     in property <bool> has-delete;
     in property <bool> upload-enabled;
+    in property <bool> upload-configured;
     in property <string> upload-provider;
     in property <string> file-name;
     callback open-link(string);
@@ -121,6 +123,7 @@ component HistoryActions inherits HorizontalLayout {
     callback open-local(string);
     callback reveal-local(string);
     callback upload-local(string);
+    callback choose-upload-destination();
     callback copy-file(string);
     callback copy-path(string);
     callback remove-entry(string);
@@ -154,6 +157,7 @@ component HistoryActions inherits HorizontalLayout {
         clicked => { root.prepare-menu(); delete-menu.show(); }
     }
 
+    // Popup actions use compact 32px rows; menu heights include their padding and gaps.
     open-menu := PopupWindow {
         x: root.width - 228px;
         y: root.height + 4px;
@@ -170,14 +174,14 @@ component HistoryActions inherits HorizontalLayout {
                 padding: 5px;
                 spacing: 2px;
 
-                FlatButton { text: "Open uploaded link"; enabled: root.action-has-remote; clicked => { open-menu.close(); root.open-link(root.selected-token); } }
-                if root.action-has-delete: FlatButton { text: "Open deletion page…"; description: "May delete the uploaded copy immediately. The local file and history entry stay."; danger: true; clicked => { root.open-deletion-selected(); } }
-                FlatButton { text: "Open local file"; enabled: root.action-has-local; clicked => { open-menu.close(); root.open-local(root.selected-token); } }
-                FlatButton { text: "Show in folder"; enabled: root.action-has-local; clicked => { open-menu.close(); root.reveal-local(root.selected-token); } }
-                if root.action-has-local && !root.action-has-remote: FlatButton {
-                    text: "Upload to " + root.upload-provider;
-                    description: "Upload this local file using saved settings. Also retries a failed upload; the local file stays unchanged.";
-                    enabled: root.upload-enabled;
+                FlatButton { height: 32px; text: "Open uploaded link"; enabled: root.action-has-remote; clicked => { open-menu.close(); root.open-link(root.selected-token); } }
+                if root.action-has-delete: FlatButton { height: 32px; text: "Open deletion page…"; description: "May delete the uploaded copy immediately. The local file and history entry stay."; danger: true; clicked => { root.open-deletion-selected(); } }
+                FlatButton { height: 32px; text: "Open local file"; enabled: root.action-has-local; clicked => { open-menu.close(); root.open-local(root.selected-token); } }
+                FlatButton { height: 32px; text: "Show in folder"; enabled: root.action-has-local; clicked => { open-menu.close(); root.reveal-local(root.selected-token); } }
+                if root.action-has-local && !root.action-has-remote: FlatButton { height: 32px;
+                    text: root.upload-configured ? "Upload to " + root.upload-provider : "Choose upload destination…";
+                    description: root.upload-configured ? "Upload this local file using saved settings. Also retries a failed upload; the local file stays unchanged." : "Choose where to upload files manually. Automatic upload stays unchanged.";
+                    enabled: !root.upload-configured || root.upload-enabled;
                     clicked => { root.upload-selected(); }
                 }
             }
@@ -200,10 +204,10 @@ component HistoryActions inherits HorizontalLayout {
                 padding: 5px;
                 spacing: 2px;
 
-                FlatButton { text: "Copy uploaded link"; enabled: root.action-has-remote; clicked => { copy-menu.close(); root.copy-link(root.selected-token); } }
-                if root.action-has-delete: FlatButton { text: "Copy deletion link"; description: "Keep this link private: anyone with it may delete the uploaded copy."; clicked => { root.copy-deletion-selected(); } }
-                FlatButton { text: "Copy local path"; enabled: root.action-has-local; clicked => { copy-menu.close(); root.copy-path(root.selected-token); } }
-                FlatButton { text: "Copy local file"; enabled: root.action-has-local; clicked => { copy-menu.close(); root.copy-file(root.selected-token); } }
+                FlatButton { height: 32px; text: "Copy uploaded link"; enabled: root.action-has-remote; clicked => { copy-menu.close(); root.copy-link(root.selected-token); } }
+                if root.action-has-delete: FlatButton { height: 32px; text: "Copy deletion link"; description: "Keep this link private: anyone with it may delete the uploaded copy."; clicked => { root.copy-deletion-selected(); } }
+                FlatButton { height: 32px; text: "Copy local path"; enabled: root.action-has-local; clicked => { copy-menu.close(); root.copy-path(root.selected-token); } }
+                FlatButton { height: 32px; text: "Copy local file"; enabled: root.action-has-local; clicked => { copy-menu.close(); root.copy-file(root.selected-token); } }
             }
         }
     }
@@ -224,8 +228,8 @@ component HistoryActions inherits HorizontalLayout {
                 padding: 5px;
                 spacing: 2px;
 
-                if root.action-has-delete: FlatButton { text: "Open deletion page…"; description: "May delete the uploaded copy immediately. The local file and history entry stay."; danger: true; clicked => { root.open-deletion-selected(); } }
-                if root.action-has-delete: FlatButton { text: "Copy deletion link"; description: "Keep this link private: anyone with it may delete the uploaded copy."; clicked => { root.copy-deletion-selected(); } }
+                if root.action-has-delete: FlatButton { height: 32px; text: "Open deletion page…"; description: "May delete the uploaded copy immediately. The local file and history entry stay."; danger: true; clicked => { root.open-deletion-selected(); } }
+                if root.action-has-delete: FlatButton { height: 32px; text: "Copy deletion link"; description: "Keep this link private: anyone with it may delete the uploaded copy."; clicked => { root.copy-deletion-selected(); } }
                 if !root.action-has-delete: HorizontalLayout {
                     padding-left: 8px;
                     padding-right: 8px;
@@ -241,8 +245,8 @@ component HistoryActions inherits HorizontalLayout {
                     }
                 }
                 Rectangle { height: 1px; background: Theme.border; }
-                FlatButton { text: "Delete local file…"; description: "Permanently delete the file from this computer. The uploaded copy and history entry stay."; danger: true; enabled: root.action-has-local; clicked => { delete-menu.close(); root.delete-local(root.selected-token); } }
-                FlatButton { text: "Remove from history only"; description: "Remove the record and its saved links. No local or uploaded files are deleted."; clicked => { delete-menu.close(); root.remove-entry(root.selected-token); } }
+                FlatButton { height: 32px; text: "Delete local file…"; description: "Permanently delete the file from this computer. The uploaded copy and history entry stay."; danger: true; enabled: root.action-has-local; clicked => { delete-menu.close(); root.delete-local(root.selected-token); } }
+                FlatButton { height: 32px; text: "Remove from history only"; description: "Remove the record and its saved links. No local or uploaded files are deleted."; clicked => { delete-menu.close(); root.remove-entry(root.selected-token); } }
             }
         }
     }
@@ -263,19 +267,19 @@ component HistoryActions inherits HorizontalLayout {
                 padding: 5px;
                 spacing: 2px;
 
-                FlatButton { text: "Open uploaded link"; enabled: root.action-has-remote; clicked => { context-menu.close(); root.open-link(root.selected-token); } }
-                if root.action-has-delete: FlatButton { text: "Open deletion page…"; description: "May delete the uploaded copy immediately. The local file and history entry stay."; danger: true; clicked => { root.open-deletion-selected(); } }
-                FlatButton { text: "Open local file"; enabled: root.action-has-local; clicked => { context-menu.close(); root.open-local(root.selected-token); } }
-                FlatButton { text: "Show in folder"; enabled: root.action-has-local; clicked => { context-menu.close(); root.reveal-local(root.selected-token); } }
-                if root.action-has-local && !root.action-has-remote: FlatButton { text: "Upload to " + root.upload-provider; description: "Upload this local file using saved settings. Also retries a failed upload; the local file stays unchanged."; enabled: root.upload-enabled; clicked => { root.upload-selected(); } }
+                FlatButton { height: 32px; text: "Open uploaded link"; enabled: root.action-has-remote; clicked => { context-menu.close(); root.open-link(root.selected-token); } }
+                if root.action-has-delete: FlatButton { height: 32px; text: "Open deletion page…"; description: "May delete the uploaded copy immediately. The local file and history entry stay."; danger: true; clicked => { root.open-deletion-selected(); } }
+                FlatButton { height: 32px; text: "Open local file"; enabled: root.action-has-local; clicked => { context-menu.close(); root.open-local(root.selected-token); } }
+                FlatButton { height: 32px; text: "Show in folder"; enabled: root.action-has-local; clicked => { context-menu.close(); root.reveal-local(root.selected-token); } }
+                if root.action-has-local && !root.action-has-remote: FlatButton { height: 32px; text: root.upload-configured ? "Upload to " + root.upload-provider : "Choose upload destination…"; description: root.upload-configured ? "Upload this local file using saved settings. Also retries a failed upload; the local file stays unchanged." : "Choose where to upload files manually. Automatic upload stays unchanged."; enabled: !root.upload-configured || root.upload-enabled; clicked => { root.upload-selected(); } }
                 Rectangle { height: 1px; background: Theme.border; }
-                FlatButton { text: "Copy uploaded link"; enabled: root.action-has-remote; clicked => { context-menu.close(); root.copy-link(root.selected-token); } }
-                if root.action-has-delete: FlatButton { text: "Copy deletion link"; description: "Keep this link private: anyone with it may delete the uploaded copy."; clicked => { root.copy-deletion-selected(); } }
-                FlatButton { text: "Copy local path"; enabled: root.action-has-local; clicked => { context-menu.close(); root.copy-path(root.selected-token); } }
-                FlatButton { text: "Copy local file"; enabled: root.action-has-local; clicked => { context-menu.close(); root.copy-file(root.selected-token); } }
+                FlatButton { height: 32px; text: "Copy uploaded link"; enabled: root.action-has-remote; clicked => { context-menu.close(); root.copy-link(root.selected-token); } }
+                if root.action-has-delete: FlatButton { height: 32px; text: "Copy deletion link"; description: "Keep this link private: anyone with it may delete the uploaded copy."; clicked => { root.copy-deletion-selected(); } }
+                FlatButton { height: 32px; text: "Copy local path"; enabled: root.action-has-local; clicked => { context-menu.close(); root.copy-path(root.selected-token); } }
+                FlatButton { height: 32px; text: "Copy local file"; enabled: root.action-has-local; clicked => { context-menu.close(); root.copy-file(root.selected-token); } }
                 Rectangle { height: 1px; background: Theme.border; }
-                FlatButton { text: "Delete local file…"; description: "Permanently delete the file from this computer. The uploaded copy and history entry stay."; danger: true; enabled: root.action-has-local; clicked => { context-menu.close(); root.delete-local(root.selected-token); } }
-                FlatButton { text: "Remove from history only"; description: "Remove the record and its saved links. No local or uploaded files are deleted."; clicked => { context-menu.close(); root.remove-entry(root.selected-token); } }
+                FlatButton { height: 32px; text: "Delete local file…"; description: "Permanently delete the file from this computer. The uploaded copy and history entry stay."; danger: true; enabled: root.action-has-local; clicked => { context-menu.close(); root.delete-local(root.selected-token); } }
+                FlatButton { height: 32px; text: "Remove from history only"; description: "Remove the record and its saved links. No local or uploaded files are deleted."; clicked => { context-menu.close(); root.remove-entry(root.selected-token); } }
             }
         }
     }
@@ -292,8 +296,43 @@ export component HistoryView inherits Rectangle {
     in property <int> sort-column: 1;
     in property <bool> sort-ascending: false;
     in property <bool> upload-enabled;
+    in property <bool> upload-configured;
     in property <string> upload-provider;
     in property <bool> settings-dirty;
+    in property <bool> checking;
+    in property <string> checking-detail;
+    in property <string> load-message;
+    callback cancel-check();
+    in-out property <string> search-query;
+    in-out property <int> filter: 0;
+    callback query-changed(string, int);
+    callback apply-search();
+    apply-search => {
+        search-delay.stop();
+        root.query-changed(root.search-query, root.filter);
+    }
+    callback select-filter(int);
+    select-filter(next-filter) => {
+        root.filter = next-filter;
+        root.apply-search();
+    }
+    callback clear-search();
+    clear-search => {
+        root.search-query = "";
+        root.filter = 0;
+        root.apply-search();
+        search-field.focus();
+    }
+    property <bool> filtered: root.search-query != "" || root.filter != 0;
+    init => {
+        if root.load-message == "" { root.apply-search(); }
+    }
+
+    search-delay := Timer {
+        interval: 180ms;
+        running: false;
+        triggered => { root.apply-search(); }
+    }
 
     callback open-link(string);
     callback copy-link(string);
@@ -302,6 +341,7 @@ export component HistoryView inherits Rectangle {
     callback open-local(string);
     callback reveal-local(string);
     callback upload-local(string);
+    callback choose-upload-destination();
     callback copy-file(string);
     callback copy-path(string);
     callback remove-entry(string);
@@ -315,7 +355,7 @@ export component HistoryView inherits Rectangle {
     property <bool> narrow: root.width < 640px;
     // Header and rows share the same column geometry, including the scroll gutter.
     property <length> table-content-width: max(0px, root.width - 24px);
-    property <length> flexible-columns-width: max(0px, root.table-content-width - 26px - 108px - (root.narrow ? 20px : 40px));
+    property <length> flexible-columns-width: max(0px, root.table-content-width - 32px - 108px - (root.narrow ? 20px : 40px));
     property <length> file-column-width: root.flexible-columns-width * (root.narrow ? 0.6 : 0.38);
     property <length> date-column-width: root.flexible-columns-width * 0.24;
     property <length> size-column-width: root.flexible-columns-width * 0.12;
@@ -331,9 +371,45 @@ export component HistoryView inherits Rectangle {
                 spacing: 2px;
 
                 PageHeading { text: "History"; }
-                PageSubtitle { text: "Local captures and uploads from this computer."; }
+                PageSubtitle { text: "Find a capture. Pick up where you left off."; }
             }
             Rectangle { vertical-stretch: 1; background: transparent; }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            vertical-stretch: 0;
+
+            search-field := CompactField {
+                height: 36px;
+                horizontal-stretch: 1;
+                label: "Search history";
+                hint: "Search filenames, public links, or local paths.";
+                placeholder-text: "Search files, links or paths";
+                text <=> root.search-query;
+                edited => { search-delay.start(); search-delay.restart(); }
+                accepted => { root.apply-search(); }
+            }
+            if root.search-query != "": FlatButton {
+                text: "Clear";
+                height: 36px;
+                description: "Clear the search text and keep the selected filter.";
+                clicked => {
+                    root.search-query = "";
+                    root.apply-search();
+                    search-field.focus();
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 6px;
+            alignment: start;
+            vertical-stretch: 0;
+
+            SelectableButton { height: 32px; min-width: 64px; text: root.filter == 0 ? "✓ All" : "All"; selected: root.filter == 0; clicked => { root.select-filter(0); } }
+            SelectableButton { height: 32px; min-width: 128px; text: root.filter == 1 ? "✓ Not uploaded" : "Not uploaded"; selected: root.filter == 1; clicked => { root.select-filter(1); } }
+            SelectableButton { height: 32px; min-width: 108px; text: root.filter == 2 ? "✓ Uploaded" : "Uploaded"; selected: root.filter == 2; clicked => { root.select-filter(2); } }
         }
 
         if root.settings-dirty: InlineNotice {
@@ -356,15 +432,15 @@ export component HistoryView inherits Rectangle {
                     background: Theme.surface-raised;
 
                     HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 36px;
+                        padding-left: 16px;
+                        padding-right: 40px;
                         spacing: 6px;
 
                         TableHeading { width: 34px; text: "Sort:"; }
-                        SortableHeading { horizontal-stretch: 1; label: "File"; column: 0; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        SortableHeading { horizontal-stretch: 1; label: "Date"; column: 1; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        SortableHeading { horizontal-stretch: 1; label: "Size"; column: 2; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        SortableHeading { horizontal-stretch: 1; label: "Expires"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
+                        SortableHeading { horizontal-stretch: 1; label: "File"; column: 0; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
+                        SortableHeading { horizontal-stretch: 1; label: "Date"; column: 1; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
+                        SortableHeading { horizontal-stretch: 1; label: "Size"; column: 2; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
+                        SortableHeading { horizontal-stretch: 1; label: "Retention"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
                     }
                 }
 
@@ -373,16 +449,16 @@ export component HistoryView inherits Rectangle {
                     background: Theme.surface-raised;
 
                     HorizontalLayout {
-                        padding-left: 14px;
-                        padding-right: 36px;
+                        padding-left: 16px;
+                        padding-right: 40px;
                         spacing: 10px;
 
                         if root.narrow: TableHeading { width: root.file-column-width; text: "File"; }
-                        if !root.narrow: SortableHeading { width: root.file-column-width; label: "File"; column: 0; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        if !root.narrow: SortableHeading { width: root.date-column-width; label: "Date"; column: 1; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        if !root.narrow: SortableHeading { width: root.size-column-width; label: "Size"; column: 2; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
-                        if root.narrow: TableHeading { horizontal-stretch: 1; text: "Expires"; }
-                        if !root.narrow: SortableHeading { horizontal-stretch: 1; label: "Expires"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.sort-column-clicked(column); } }
+                        if !root.narrow: SortableHeading { width: root.file-column-width; label: "File"; column: 0; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
+                        if !root.narrow: SortableHeading { width: root.date-column-width; label: "Date"; column: 1; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
+                        if !root.narrow: SortableHeading { width: root.size-column-width; label: "Size"; column: 2; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
+                        if root.narrow: TableHeading { horizontal-stretch: 1; text: "Retention"; }
+                        if !root.narrow: SortableHeading { horizontal-stretch: 1; label: "Retention"; column: 3; active-column: root.sort-column; ascending: root.sort-ascending; clicked(column) => { root.apply-search(); root.sort-column-clicked(column); } }
                         TableHeading { width: 108px; text: "Actions"; horizontal-alignment: center; }
                     }
                 }
@@ -396,13 +472,27 @@ export component HistoryView inherits Rectangle {
                         cross-axis-alignment: center;
                         spacing: 8px;
 
-                        Text { text: "No captures yet"; color: Theme.text; font-size: 16px; font-weight: 600; horizontal-alignment: center; }
-                        Text { text: "Captures and uploads will appear here, with their links and local files."; color: Theme.text-muted; font-size: 13px; horizontal-alignment: center; wrap: word-wrap; }
-                        FlatButton { text: "Capture a region"; min-width: 128px; clicked => { root.show-capture(); } }
+                        Text { text: root.checking ? "Checking history…" : root.load-message != "" ? root.load-message : root.filtered ? "No matching captures" : "No captures yet"; color: Theme.text; font-size: 16px; font-weight: 600; horizontal-alignment: center; }
+                        Text { text: root.checking || root.load-message != "" ? root.checking-detail : root.filtered ? "Try another filename, public link or local path." : "Your saved captures and uploaded files will appear here."; color: Theme.text-muted; font-size: 13px; horizontal-alignment: center; wrap: word-wrap; }
+                        FlatButton {
+                            text: root.checking ? "Cancel search" : root.load-message != "" ? "Retry search" : root.filtered ? "Clear search and filters" : "Go to Capture";
+                            min-width: 176px;
+                            clicked => {
+                                if root.checking {
+                                    search-delay.stop();
+                                    root.cancel-check();
+                                }
+                                else if root.load-message != "" { root.apply-search(); }
+                                else if root.filtered { root.clear-search(); }
+                                else { root.show-capture(); }
+                            }
+                        }
                     }
                 }
 
-                if root.rows.length > 0: AppScrollView {
+                if root.rows.length > 0: history-scroll := AppScrollView {
+                    property <string> first-row-token: root.rows.length > 0 ? root.rows[0].action-token : "";
+                    changed first-row-token => { history-scroll.viewport-y = 0px; }
                     vertical-stretch: 1;
                     min-height: 0px;
 
@@ -410,7 +500,7 @@ export component HistoryView inherits Rectangle {
                         spacing: 0px;
 
                         for row[index] in root.rows: Rectangle {
-                            height: max(root.narrow ? 78px : 56px, expiry-cell.preferred-height + 16px);
+                            height: max(root.narrow ? 100px : 76px, expiry-cell.preferred-height + 20px);
                             border-width: 0px;
                             background: Math.mod(index, 2) == 1 ? #ffffff05 : transparent;
 
@@ -423,10 +513,10 @@ export component HistoryView inherits Rectangle {
                             }
 
                             HorizontalLayout {
-                                padding-left: 14px;
-                                padding-right: 12px;
-                                padding-top: 8px;
-                                padding-bottom: 8px;
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                padding-top: 10px;
+                                padding-bottom: 10px;
                                 spacing: 10px;
                                 cross-axis-alignment: center;
 
@@ -438,19 +528,26 @@ export component HistoryView inherits Rectangle {
                                     Text {
                                         text: row.filename;
                                         color: Theme.text;
-                                        font-size: 13px;
+                                        font-size: 14px;
                                         font-weight: 600;
                                         overflow: elide;
 
-                                        Tooltip { text: @markdown("\{row.filename}"); }
+                                        Tooltip { TooltipContent { text: row.filename; } }
                                     }
                                     Text {
-                                        text: row.link != "" ? row.display-link : (row.local-path != "" ? row.display-local-path : "Local file no longer available");
+                                        text: row.link != "" ? (row.local-path != "" ? "Local + uploaded" : "Uploaded") : (row.local-path != "" ? "Local only" : "File unavailable");
+                                        color: Theme.text-soft;
+                                        font-size: 11px;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+                                    location-text := Text {
+                                        text: row.link != "" ? row.display-link : (row.local-path != "" ? row.display-local-path : "No saved copy or uploaded link");
                                         color: row.link != "" ? Theme.primary-bright : Theme.text-muted;
                                         font-size: 11.5px;
                                         overflow: elide;
 
-                                        Tooltip { text: @markdown("\{parent.text}"); }
+                                        Tooltip { TooltipContent { text: location-text.text; } }
                                     }
                                     if root.narrow: Text {
                                         text: row.created;
@@ -475,6 +572,7 @@ export component HistoryView inherits Rectangle {
                                     has-remote: row.link != "";
                                     has-delete: row.delete-link != "";
                                     upload-enabled: root.upload-enabled;
+                                    upload-configured: root.upload-configured;
                                     upload-provider: root.upload-provider;
 
                                     open-link(action-token) => { root.open-link(action-token); }
@@ -484,6 +582,7 @@ export component HistoryView inherits Rectangle {
                                     open-local(action-token) => { root.open-local(action-token); }
                                     reveal-local(action-token) => { root.reveal-local(action-token); }
                                     upload-local(action-token) => { root.upload-local(action-token); }
+                                    choose-upload-destination => { root.choose-upload-destination(); }
                                     copy-file(action-token) => { root.copy-file(action-token); }
                                     copy-path(action-token) => { root.copy-path(action-token); }
                                     remove-entry(action-token) => { root.remove-entry(action-token); }
@@ -501,16 +600,26 @@ export component HistoryView inherits Rectangle {
                     background: Theme.surface-raised;
 
                     HorizontalLayout {
-                        padding-left: 14px;
+                        padding-left: 16px;
                         padding-right: 14px;
                         spacing: 10px;
                         cross-axis-alignment: center;
 
-                        FlatButton { min-width: 88px; text: "Previous"; enabled: root.has-previous; clicked => { root.previous-page(); } }
-                        Rectangle { horizontal-stretch: 1; background: transparent; }
-                        Text { text: root.page-label; color: Theme.text-soft; font-size: 12.5px; vertical-alignment: center; horizontal-alignment: center; }
-                        Rectangle { horizontal-stretch: 1; background: transparent; }
-                        FlatButton { min-width: 88px; text: "Next"; enabled: root.has-next; clicked => { root.next-page(); } }
+                        FlatButton { min-width: 88px; text: "Previous"; enabled: root.has-previous; clicked => { root.apply-search(); root.previous-page(); } }
+                        Text {
+                            min-width: 0px;
+                            horizontal-stretch: 1;
+                            text: root.page-label;
+                            accessible-live-region: polite;
+                            accessible-label: root.checking ? "Checking history" : root.load-message != "" ? root.load-message : root.page-label;
+                            color: Theme.text-soft;
+                            font-size: 12.5px;
+                            vertical-alignment: center;
+                            horizontal-alignment: center;
+                            overflow: elide;
+                            Tooltip { TooltipContent { text: root.page-label; } }
+                        }
+                        FlatButton { min-width: 88px; text: "Next"; enabled: root.has-next; clicked => { root.apply-search(); root.next-page(); } }
                     }
                 }
             }

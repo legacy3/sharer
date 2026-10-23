@@ -22,6 +22,8 @@ use sharer::{
     upload::{UploadRoute, ensure_tls_provider},
 };
 
+mod resolver;
+
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4096;
@@ -106,11 +108,8 @@ fn install_into(
         .prefix(".download-")
         .tempdir_in(directory)?;
     let mut archive = tempfile::tempfile_in(staging.path())?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
 
-    runtime.block_on(download(
+    run_download(download(
         source,
         require_proxy,
         cancelled,
@@ -140,6 +139,20 @@ fn install_into(
     Ok(destination)
 }
 
+fn run_download(operation: impl Future<Output = Result<()>>) -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()?;
+    let result = runtime.block_on(operation);
+
+    // System DNS may still be running in Tokio's blocking pool after its request
+    // is cancelled. It owns no archive/staging handles; do not wait indefinitely
+    // for it before returning control to the setup dialog.
+    runtime.shutdown_timeout(Duration::from_millis(100));
+    result
+}
+
 async fn download(
     source: &DownloadSource,
     require_proxy: bool,
@@ -149,6 +162,7 @@ async fn download(
 ) -> Result<()> {
     ensure_tls_provider();
     let builder = Client::builder()
+        .dns_resolver(resolver::InstallerResolver)
         .https_only(true)
         .connect_timeout(Duration::from_secs(10))
         .read_timeout(Duration::from_secs(10))

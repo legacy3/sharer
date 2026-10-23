@@ -1,58 +1,111 @@
 import { Theme } from "theme.slint";
-import { FlatButton, PageHeading } from "components.slint";
+import { AppScrollView, FlatButton, PageHeading } from "components.slint";
 
 export component FfmpegSetup inherits Rectangle {
     in property <bool> downloading;
+    in property <bool> cancelling;
+    in property <bool> download-available: true;
+    in property <bool> failed;
     in property <float> progress;
     in property <string> message;
     callback download();
     callback cancel();
     property <bool> cancel-focused: false;
+    property <bool> can-download: root.download-available && !root.downloading;
+    property <string> heading: root.cancelling ? "Cancelling setup" : root.downloading ? "Setting up FFmpeg" : root.failed ? "FFmpeg setup failed" : root.download-available ? "FFmpeg required" : "FFmpeg setup unavailable";
+
     background: #00000099;
+    accessible-role: groupbox;
+    accessible-label: root.heading;
     TouchArea { }
-    init => { download-button.focus(); }
+
+    init => {
+        root.cancel-focused = !root.can-download;
+        if root.can-download { download-button.focus(); }
+        else { cancel-button.focus(); }
+    }
     changed downloading => {
         if root.downloading { root.cancel-focused = true; cancel-button.focus(); }
     }
+    changed message => { message-scroll.viewport-y = 0px; }
+
     keyboard-focus := FocusScope {
         width: parent.width;
         height: parent.height;
         focus-on-tab-navigation: false;
+        focus-on-click: false;
         key-pressed(event) => {
             if event.text == Key.Escape { root.cancel(); return accept; }
-            if event.text == Key.Tab {
-                root.cancel-focused = root.downloading || !root.cancel-focused;
+            if event.text == Key.Tab || event.text == Key.Backtab {
+                root.cancel-focused = !root.can-download || !root.cancel-focused;
                 if root.cancel-focused { cancel-button.focus(); }
                 else { download-button.focus(); }
                 return accept;
             }
+            if event.text == Key.DownArrow || event.text == Key.PageDown {
+                message-scroll.viewport-y = max(min(0px, message-scroll.visible-height - message-scroll.viewport-height), message-scroll.viewport-y - (event.text == Key.PageDown ? message-scroll.visible-height : 36px));
+                return accept;
+            }
+            if event.text == Key.UpArrow || event.text == Key.PageUp {
+                message-scroll.viewport-y = min(0px, message-scroll.viewport-y + (event.text == Key.PageUp ? message-scroll.visible-height : 36px));
+                return accept;
+            }
             return reject;
         }
+
         Rectangle {
-            width: min(480px, parent.width - 40px);
-            height: content.preferred-height + 40px;
+            width: min(500px, parent.width - 40px);
+            height: min(parent.height - 40px, max(270px, message-text.preferred-height + 170px));
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
             background: Theme.surface;
-            border-color: Theme.border;
+            border-color: root.failed ? Theme.danger : Theme.border;
             border-width: 1px;
-            border-radius: 10px;
-            content := VerticalLayout {
-                padding: 20px;
+            border-radius: Theme.card-radius;
+
+            VerticalLayout {
+                padding: 24px;
                 spacing: 16px;
-                PageHeading { text: root.downloading ? "Setting up FFmpeg" : "FFmpeg required"; }
-                Text { text: root.message; wrap: word-wrap; color: Theme.text-soft; }
+
+                PageHeading { text: root.heading; font-size: 22px; }
+                message-scroll := AppScrollView {
+                    min-height: 60px;
+                    vertical-stretch: 1;
+                    message-text := Text {
+                        text: root.message;
+                        wrap: word-wrap;
+                        color: Theme.text-soft;
+                        font-size: 13.5px;
+                    }
+                }
                 if root.downloading: Rectangle {
                     height: 5px;
+                    vertical-stretch: 0;
                     background: Theme.surface-raised;
                     border-radius: 2px;
-                    Rectangle { x: 0px; y: 0px; width: parent.width * root.progress; height: parent.height; background: Theme.primary; border-radius: 2px; }
+                    accessible-role: progress-indicator;
+                    accessible-label: root.cancelling ? "Cancelling FFmpeg setup" : "Downloading FFmpeg";
+                    accessible-value: round(clamp(root.progress, 0, 1) * 100);
+                    accessible-value-minimum: 0;
+                    accessible-value-maximum: 100;
+                    Rectangle { x: 0px; y: 0px; width: parent.width * clamp(root.progress, 0, 1); height: parent.height; background: Theme.primary; border-radius: 2px; }
                 }
                 HorizontalLayout {
-                    spacing: root.downloading ? 0px : 8px;
+                    spacing: root.can-download ? 8px : 0px;
                     Rectangle { horizontal-stretch: 1; }
-                    cancel-button := FlatButton { width: 90px; text: "Cancel"; clicked => { root.cancel(); } }
-                    download-button := FlatButton { visible: !root.downloading; enabled: !root.downloading; width: root.downloading ? 0px : 110px; text: "Download"; primary: true; clicked => { root.download(); } }
+                    cancel-button := FlatButton {
+                        min-width: root.cancelling ? 128px : 90px;
+                        text: root.cancelling ? "Cancelling…" : (!root.download-available && !root.downloading ? "Close" : "Cancel");
+                        clicked => { root.cancel(); }
+                    }
+                    download-button := FlatButton {
+                        visible: root.can-download;
+                        enabled: root.can-download;
+                        width: root.can-download ? 128px : 0px;
+                        text: root.failed ? "Retry download" : "Download";
+                        primary: true;
+                        clicked => { root.download(); }
+                    }
                 }
             }
         }

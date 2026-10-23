@@ -1,9 +1,12 @@
 import { Theme } from "theme.slint";
 
 export component RegionWindow inherits Window {
+    default-font-family: "IBM Plex Sans";
     title: "Select a region";
     default-font-size: 13px;
     no-frame: true;
+    in property <bool> keep-above: false;
+    always-on-top: root.keep-above;
     background: #000;
     in property <image> capture-image;
     in property <string> selection-instruction: "Drag to select  -  click a window  -  Esc to cancel";
@@ -27,8 +30,10 @@ export component RegionWindow inherits Window {
 
     init => { keyboard-focus.focus(); }
 
-    Image { source: root.capture-image; width: 100%; height: 100%; image-fit: fill; }
-    Rectangle { width: 100%; height: 100%; background: #00000038; }
+    // Physical capture pixels must not become the window's preferred logical
+    // size. These layers follow the monitor-sized window set by the backend.
+    Image { x: 0px; y: 0px; source: root.capture-image; width: 100%; height: 100%; image-fit: fill; }
+    Rectangle { x: 0px; y: 0px; width: 100%; height: 100%; background: #00000038; }
 
     if root.snap-active && !root.selecting && area.has-hover: Rectangle {
         x: root.snap-x * root.width;
@@ -72,6 +77,8 @@ export component RegionWindow inherits Window {
     }
 
     area := TouchArea {
+        x: 0px;
+        y: 0px;
         width: 100%;
         height: 100%;
         mouse-cursor: crosshair;

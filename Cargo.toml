@@ -53,7 +53,7 @@ directories = "6"
 global-hotkey = { version = "0.8.0", optional = true }
 getrandom = { version = "0.3.3", optional = true }
 hex = { version = "0.4.3", optional = true }
-image = { version = "0.25.10", default-features = false, features = ["ico", "png"] }
+image = { version = "0.25.10", default-features = false, features = ["ico", "jpeg", "png"] }
 mime_guess = "2"
 futures-util = "0.3"
 num-traits = { version = "0.2", optional = true }
@@ -79,6 +79,9 @@ zip = { version = "9", default-features = false, features = ["deflate-flate2-zli
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 slint = { version = "1.17.1", default-features = false, features = ["renderer-femtovg"], optional = true }
 
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+
 [target.'cfg(windows)'.dependencies]
 half = { version = "2", optional = true }
 reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "multipart", "native-tls", "socks", "stream", "system-proxy"] }
@@ -86,7 +89,7 @@ ultrahdr = { version = "0.1.5", default-features = true, optional = true }
 windows-capture = { version = "2.0.1", optional = true }
 windows = { version = "0.62.2", features = ["Win32_Devices_Display", "Win32_Graphics_Gdi", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"], optional = true }
 windows-registry = { version = "0.6.1", optional = true }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 xcap = { version = "0.9.8", default-features = false, features = ["wgc"], optional = true }
 
 [target.'cfg(windows)'.build-dependencies]
@@ -96,7 +99,7 @@ winresource = "0.1.31"
 gtk = { version = "0.18.2", optional = true }
 libloading = { version = "0.8.9", optional = true }
 reqwest = { version = "0.13.1", default-features = false, features = ["blocking", "json", "multipart", "rustls-no-provider", "socks", "stream", "system-proxy"] }
-rustls = { version = "0.23.37", default-features = false, features = ["ring", "std", "tls12"] }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 xcap = { version = "0.9.8", default-features = false, optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -1,0 +1,92 @@
+import { Theme } from "theme.slint";
+import { AppScrollView, FlatButton, PageHeading } from "components.slint";
+
+export component ConfirmationDialog inherits Rectangle {
+    in property <string> title;
+    in property <string> description;
+    in property <string> target;
+    in property <string> action-label;
+    callback response(bool);
+    property <bool> cancel-focused: true;
+
+    background: #00000099;
+    accessible-role: groupbox;
+    accessible-label: root.title;
+    TouchArea { }
+    init => { cancel-button.focus(); }
+
+    keyboard-focus := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-tab-navigation: false;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Escape { root.response(false); return accept; }
+            if event.text == Key.Tab || event.text == Key.Backtab {
+                root.cancel-focused = !root.cancel-focused;
+                if root.cancel-focused { cancel-button.focus(); }
+                else { action-button.focus(); }
+                return accept;
+            }
+            if event.text == Key.DownArrow || event.text == Key.PageDown {
+                body-scroll.viewport-y = max(min(0px, body-scroll.visible-height - body-scroll.viewport-height), body-scroll.viewport-y - (event.text == Key.PageDown ? body-scroll.visible-height : 36px));
+                return accept;
+            }
+            if event.text == Key.UpArrow || event.text == Key.PageUp {
+                body-scroll.viewport-y = min(0px, body-scroll.viewport-y + (event.text == Key.PageUp ? body-scroll.visible-height : 36px));
+                return accept;
+            }
+            return reject;
+        }
+
+        Rectangle {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            width: min(500px, parent.width - 40px);
+            height: min(parent.height - 40px, 340px);
+            background: Theme.surface;
+            border-color: Theme.border-bright;
+            border-width: 1px;
+            border-radius: Theme.card-radius;
+
+            VerticalLayout {
+                padding: 24px;
+                spacing: 18px;
+                PageHeading { text: root.title; font-size: 22px; wrap: word-wrap; }
+                body-scroll := AppScrollView {
+                    min-height: 64px;
+                    vertical-stretch: 1;
+                    content-spacing: 14px;
+                    Text {
+                        text: root.target;
+                        wrap: word-wrap;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    Text {
+                        text: root.description;
+                        wrap: word-wrap;
+                        color: Theme.text-soft;
+                        font-size: 13.5px;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Rectangle { horizontal-stretch: 1; }
+                    cancel-button := FlatButton {
+                        min-width: 90px;
+                        text: "Cancel";
+                        clicked => { root.response(false); }
+                    }
+                    action-button := FlatButton {
+                        min-width: 170px;
+                        text: root.action-label;
+                        danger: true;
+                        clicked => { root.response(true); }
+                    }
+                }
+            }
+        }
+    }
+}

@@ -51,14 +51,24 @@ const CAPTURE_OUTPUT_REQUIRED: &str = "Enable local capture copies or automatic 
 type RecordingControl = Rc<RefCell<Option<Sender<()>>>>;
 type UiSlot = Rc<RefCell<Option<UiSession>>>;
 
+mod artifact;
+#[cfg(test)]
+mod artifact_tests;
 mod ffmpeg_setup;
 mod job;
 mod native_renderer;
 mod onboarding;
 mod preferences;
+mod preview;
 mod region;
 mod result;
 
+use artifact::{
+    begin_artifact_attempt, clear_last_receipt, has_artifact, set_artifact_action_status,
+    set_artifact_result_status, wire_last_result_callbacks, wire_latest_upload_callback,
+};
+#[cfg(test)]
+use artifact::{latest_upload_source, run_last_local_action};
 #[cfg(test)]
 use job::process_job_with_history;
 use job::spawn_worker;
@@ -87,6 +97,7 @@ struct CloseState {
 #[derive(Debug)]
 enum JobSource {
     File(PathBuf),
+    ExistingLocal(HistoryEntry),
     History(HistoryEntry),
     Clipboard,
     Prepared {
@@ -132,6 +143,7 @@ struct UploadOptions {
 
 struct PollingState {
     activity: Rc<RefCell<Option<ActivitySnapshot>>>,
+    preview: RefCell<preview::Previewer>,
     hotkeys: Rc<RefCell<Option<Hotkeys>>>,
     job_tx: Sender<Job>,
     result_rx: Receiver<JobResult>,
@@ -150,6 +162,7 @@ struct PollingState {
 #[derive(Clone)]
 struct CallbackResources {
     activity: Rc<RefCell<Option<ActivitySnapshot>>>,
+    history_loader: Rc<RefCell<views::history::HistoryLoader>>,
     hotkeys: Rc<RefCell<Option<Hotkeys>>>,
     hotkey_status: Rc<RefCell<String>>,
     job_tx: Sender<Job>,
@@ -374,6 +387,7 @@ pub fn run(options: DesktopOptions) -> Result<()> {
     spawn_worker(job_rx, result_tx, worker_progress, options.require_tor)?;
     let callback_resources = CallbackResources {
         activity: Rc::clone(&activity),
+        history_loader: Rc::new(RefCell::new(views::history::HistoryLoader::new(&storage)?)),
         hotkeys: Rc::clone(&hotkeys),
         hotkey_status: Rc::clone(&hotkey_status),
         job_tx: job_tx.clone(),
@@ -389,6 +403,7 @@ pub fn run(options: DesktopOptions) -> Result<()> {
     let tray = Rc::new(RefCell::new(None));
     let polling_state = PollingState {
         activity,
+        preview: RefCell::new(preview::Previewer::new()),
         hotkeys,
         job_tx,
         result_rx,
@@ -674,10 +689,11 @@ fn ensure_ui(ui: &UiSlot, resources: &CallbackResources, transient: bool) -> Res
         install_window_event_filter(&window, resources);
 
         views::settings::initialize(&window, &resources.config.borrow());
+        window.set_force_require_proxy(resources.require_proxy);
         window.set_tray_available(resources.tray_available.get());
         window.set_hotkey_status(resources.hotkey_status.borrow().as_str().into());
 
-        if !transient && let Some(activity) = resources.activity.borrow().as_ref() {
+        if let Some(activity) = resources.activity.borrow().as_ref() {
             apply_activity(&window, activity);
         }
 
@@ -694,12 +710,13 @@ fn ensure_ui(ui: &UiSlot, resources: &CallbackResources, transient: bool) -> Res
         let history_removed: views::history::HistoryRemovalObserver = Rc::new(move |window, id| {
             invalidate_latest_history_saved(window, activity.as_ref(), id);
         });
-        let history = views::history::initialize(
+        let history = views::history::initialize_with_loader(
             &window,
             &resources.storage,
             transient,
             &local_deleted,
             &history_removed,
+            &resources.history_loader,
         )?;
         let close_requested = Rc::new(Cell::new(false));
 
@@ -880,6 +897,7 @@ fn wire_callbacks(
     });
 
     wire_last_result_callbacks(window);
+    wire_latest_upload_callback(window, job_tx, resources);
     wire_management_callbacks(
         window,
         &resources.hotkeys,
@@ -888,115 +906,6 @@ fn wire_callbacks(
         &resources.storage,
     );
     wire_close_callback(window, history, close_requested, &resources.config);
-}
-
-fn wire_last_result_callbacks(window: &AppWindow) {
-    let window_weak = window.as_weak();
-
-    window.on_open_link(move || {
-        if let Some(window) = window_weak.upgrade() {
-            let link = window.get_last_link();
-
-            if !link.is_empty() {
-                match open::that(link.as_str()) {
-                    Ok(()) => window.set_status_detail("Opened public link in the browser".into()),
-
-                    Err(_) => {
-                        window
-                            .set_status_detail("Could not open public link in the browser".into());
-                    }
-                }
-            }
-        }
-    });
-
-    let window_weak = window.as_weak();
-
-    window.on_copy_last_link(move || {
-        if let Some(window) = window_weak.upgrade() {
-            let link = window.get_last_link();
-
-            if !link.is_empty() {
-                match clipboard::copy_link(link.as_str()) {
-                    Ok(()) => window.set_status_detail("Public link copied to clipboard".into()),
-
-                    Err(error) => {
-                        window.set_status_detail(format!("Could not copy link: {error:#}").into());
-                    }
-                }
-            }
-        }
-    });
-
-    let window_weak = window.as_weak();
-
-    window.on_copy_last_delete(move || {
-        if let Some(window) = window_weak.upgrade() {
-            let link = window.get_last_delete_url();
-
-            if !link.is_empty() {
-                match clipboard::copy_link(link.as_str()) {
-                    Ok(()) => {
-                        window.set_status_detail("Deletion URL copied to clipboard".into());
-                    }
-
-                    Err(error) => {
-                        window.set_status_detail(
-                            format!("Could not copy deletion URL: {error:#}").into(),
-                        );
-                    }
-                }
-            }
-        }
-    });
-
-    let window_weak = window.as_weak();
-
-    window.on_open_last_delete(move || {
-        if let Some(window) = window_weak.upgrade() {
-            let link = window.get_last_delete_url();
-
-            if !link.is_empty() && views::history::confirm_deletion_page() {
-                window.set_status_detail(
-                    views::history::deletion_page_status(&open::that(link.as_str())).into(),
-                );
-            }
-        }
-    });
-
-    let window_weak = window.as_weak();
-
-    window.on_open_last_local(move || {
-        if let Some(window) = window_weak.upgrade() {
-            run_last_local_action(&window, |path| {
-                anyhow::ensure!(path.is_file(), "local capture no longer exists");
-                open::that(path).context("failed to open local capture")?;
-                Ok("Opened local capture")
-            });
-        }
-    });
-
-    let window_weak = window.as_weak();
-
-    window.on_reveal_last_local(move || {
-        if let Some(window) = window_weak.upgrade() {
-            run_last_local_action(&window, |path| {
-                views::history::reveal_file(path)?;
-                Ok("Opened capture folder")
-            });
-        }
-    });
-
-    let window_weak = window.as_weak();
-
-    window.on_copy_last_file(move || {
-        if let Some(window) = window_weak.upgrade() {
-            run_last_local_action(&window, |path| {
-                clipboard::copy_file(path)?;
-                Ok("Local file copied to clipboard")
-            });
-        }
-    });
 }
 
 fn wire_management_callbacks(
@@ -1080,6 +989,10 @@ fn wire_close_callback(
             window.invoke_shortcut_recording_finished();
         }
 
+        if window.get_confirmation_visible() {
+            window.invoke_confirmation_response(false);
+        }
+
         let state = CloseState {
             busy: window.get_busy(),
             minimize_to_tray: config.borrow().behavior.minimize_to_tray
@@ -1088,9 +1001,7 @@ fn wire_close_callback(
 
         match close_action(state) {
             CloseAction::KeepShown => {
-                window.set_status_detail(
-                    "Finish or stop the current capture/upload before quitting".into(),
-                );
+                window.set_status_detail(blocked_quit_detail(&window).into());
 
                 slint::CloseRequestResponse::KeepWindowShown
             }
@@ -1110,7 +1021,9 @@ fn wire_close_callback(
             }
 
             CloseAction::Quit => {
-                if !may_quit_with_draft(&window, confirm_discard_settings) {
+                if !may_quit_with_draft(&window, |_| {
+                    let _ = slint::quit_event_loop();
+                }) {
                     return slint::CloseRequestResponse::KeepWindowShown;
                 }
 
@@ -1133,7 +1046,7 @@ const fn close_action(state: CloseState) -> CloseAction {
 }
 
 fn can_start_job(window: &AppWindow) -> bool {
-    if window.get_busy() || window.get_show_onboarding() {
+    if window.get_busy() || window.get_show_onboarding() || window.get_confirmation_visible() {
         return false;
     }
 
@@ -1182,7 +1095,7 @@ fn queue_screenshot(
     let window_weak = window.as_weak();
     let sender = sender.clone();
 
-    clear_last_receipt(window);
+    begin_artifact_attempt(window);
     window.set_busy(true);
     window.set_status_text("Capturing screen...".into());
     window.set_status_detail("Waiting for ShareR to leave the captured frame".into());
@@ -1276,6 +1189,21 @@ fn wire_history_upload_callback(
     });
 }
 
+fn upload_options_from_window(window: &AppWindow) -> Result<UploadOptions> {
+    let lifetime_seconds = u32::try_from(window.get_lifetime_seconds())
+        .context("Lifetime must be zero (server default) or a positive number of seconds")?;
+
+    validate_lifetime(lifetime_seconds)?;
+
+    Ok(UploadOptions {
+        uploader: views::settings::upload_target_from_window(window)
+            .context("Configure the selected uploader in Settings")?,
+        lifetime_seconds,
+        require_tor: window.get_require_tor(),
+        copy_link: window.get_copy_link_after_upload(),
+    })
+}
+
 fn queue_job(
     window: &AppWindow,
     sender: &Sender<Job>,
@@ -1286,42 +1214,53 @@ fn queue_job(
         return;
     }
 
-    let Some(lifetime_seconds) = valid_window_lifetime(window) else {
-        return;
-    };
-    let Some(uploader) = valid_window_upload_target(window) else {
-        return;
+    let options = match upload_options_from_window(window) {
+        Ok(options) => options,
+
+        Err(error) => {
+            present_error(window, FailureStage::Settings, &format!("{error:#}"));
+
+            return;
+        }
     };
 
-    clear_last_receipt(window);
-    window.set_busy(true);
-    window.set_uploading(true);
-    window.set_upload_progress(0.0);
-    window.set_status_text("Uploading...".into());
-    window.set_status_detail(upload_status_detail(&uploader, lifetime_seconds).into());
+    queue_upload_job(window, sender, source, options, cancellation);
+}
+
+fn queue_upload_job(
+    window: &AppWindow,
+    sender: &Sender<Job>,
+    source: JobSource,
+    options: UploadOptions,
+    cancellation: Arc<UploadCancellation>,
+) {
+    let detail = upload_status_detail(&options.uploader, options.lifetime_seconds);
+
     cancellation.reset();
 
     if sender
         .send(Job {
             source,
-            upload: Some(UploadOptions {
-                uploader,
-                lifetime_seconds,
-                require_tor: window.get_require_tor(),
-                copy_link: window.get_copy_link_after_upload(),
-            }),
+            upload: Some(options),
             remove_exif: window.get_remove_exif(),
             cancellation,
             restore_window_after_capture: false,
         })
         .is_err()
     {
-        present_error(
-            window,
-            FailureStage::Upload,
-            "Upload worker stopped unexpectedly",
-        );
+        set_artifact_action_status(window, "Upload worker stopped unexpectedly", true);
+        window.set_status_text(FailureStage::Upload.status().into());
+        window.set_status_detail("Upload worker stopped unexpectedly".into());
+
+        return;
     }
+
+    begin_artifact_attempt(window);
+    window.set_busy(true);
+    window.set_uploading(true);
+    window.set_upload_progress(0.0);
+    window.set_status_text("Uploading...".into());
+    window.set_status_detail(detail.into());
 }
 
 fn queue_capture_job(
@@ -1358,7 +1297,7 @@ fn queue_capture_job(
         return;
     }
 
-    clear_last_receipt(window);
+    begin_artifact_attempt(window);
     window.set_busy(true);
     window.set_upload_progress(0.0);
 
@@ -1397,35 +1336,6 @@ fn queue_capture_job(
             FailureStage::Capture,
             "Capture worker stopped unexpectedly",
         );
-    }
-}
-
-fn clear_last_receipt(window: &AppWindow) {
-    window.set_history_action_detail("".into());
-    window.set_history_action_failed(false);
-    window.set_last_link("".into());
-    window.set_last_local_path("".into());
-    window.set_last_delete_url("".into());
-    window.set_last_delete_saved(false);
-    window.invoke_receipt_cleared();
-}
-
-fn run_last_local_action(
-    window: &AppWindow,
-    action: impl FnOnce(&std::path::Path) -> Result<&'static str>,
-) {
-    let path = PathBuf::from(window.get_last_local_path().as_str());
-
-    if path.as_os_str().is_empty() {
-        return;
-    }
-
-    match action(&path) {
-        Ok(detail) => window.set_status_detail(detail.into()),
-
-        Err(error) => {
-            window.set_status_detail(format!("Local file action failed: {error:#}").into());
-        }
     }
 }
 
@@ -1474,6 +1384,8 @@ fn upload_status_detail(target: &UploadTarget, lifetime_seconds: u32) -> String 
                 display_lifetime(lifetime_seconds)
             )
         }
+    } else if target.kind == sharer::upload::UploaderKind::Litterbox {
+        target.litterbox_retention.description().to_owned()
     } else {
         format!("Retention managed by {}", target.kind.name())
     }
@@ -1507,6 +1419,9 @@ fn start_polling(
                 update_upload_progress(&window, &state.upload_progress);
                 receive_job_result(&window, &state.result_rx, &state, &mut status);
                 receive_update(&window, &state.update_rx, &state.update_state);
+                state.preview.borrow_mut().refresh(&window);
+            } else {
+                state.preview.borrow_mut().suspend();
             }
 
             promote_visible_transient_ui(&state.ui, &resources.storage);
@@ -1528,8 +1443,14 @@ fn start_polling(
             }
 
             release_idle_transient_ui(&state.ui, &resources.storage);
+
+            if current_window(&state.ui).is_none() {
+                state.preview.borrow_mut().suspend();
+            }
+
             let active_ui = current_window(&state.ui)
                 .is_some_and(|window| window.window().is_visible() || window.get_busy());
+
             let tray_click_pending = state
                 .tray
                 .borrow()
@@ -1659,6 +1580,13 @@ fn handle_action(action: TrayAction, state: &PollingState, resources: &CallbackR
 
 fn handle_quit(ui: &UiSlot, upload_cancellation: &UploadCancellation, quit_after_job: &Cell<bool>) {
     let window = current_window(ui);
+
+    if let Some(window) = window.as_ref()
+        && window.get_confirmation_visible()
+    {
+        window.invoke_confirmation_response(false);
+    }
+
     let decision = quit_decision(QuitState {
         busy: window.as_ref().is_some_and(AppWindow::get_busy),
         uploading: window.as_ref().is_some_and(AppWindow::get_uploading),
@@ -1668,7 +1596,9 @@ fn handle_quit(ui: &UiSlot, upload_cancellation: &UploadCancellation, quit_after
     match decision {
         QuitDecision::ExitNow => {
             if let Some(window) = window.as_ref()
-                && !may_quit_with_draft(window, confirm_discard_settings)
+                && !may_quit_with_draft(window, |_| {
+                    let _ = slint::quit_event_loop();
+                })
             {
                 return;
             }
@@ -1696,11 +1626,17 @@ fn handle_quit(ui: &UiSlot, upload_cancellation: &UploadCancellation, quit_after
             if let Some(window) = window {
                 let _ = window.show();
 
-                window.set_status_detail(
-                    "Finish or stop the current capture/upload before quitting".into(),
-                );
+                window.set_status_detail(blocked_quit_detail(&window).into());
             }
         }
+    }
+}
+
+fn blocked_quit_detail(window: &AppWindow) -> &'static str {
+    if window.get_ffmpeg_setup_visible() {
+        "Cancel FFmpeg setup before quitting"
+    } else {
+        "Finish or stop the current capture/upload before quitting"
     }
 }
 
@@ -1710,8 +1646,8 @@ fn pick_upload_file() -> Option<PathBuf> {
         .pick_file()
 }
 
-fn may_quit_with_draft(window: &AppWindow, confirm_discard: impl FnOnce() -> bool) -> bool {
-    if !window.get_settings_dirty() || confirm_discard() {
+fn may_quit_with_draft(window: &AppWindow, quit: impl FnOnce(&AppWindow) + 'static) -> bool {
+    if !window.get_settings_dirty() {
         return true;
     }
 
@@ -1719,23 +1655,26 @@ fn may_quit_with_draft(window: &AppWindow, confirm_discard: impl FnOnce() -> boo
     let _ = window.show();
 
     foreground_ui(window);
+    views::confirmation::request(
+        window,
+        &views::confirmation::Confirmation {
+            title: "Discard settings and quit?",
+            description: "Your changes have not been saved. Cancel to keep editing, or discard the changes and quit ShareR. Your previously saved settings will stay.",
+            target: "Unsaved settings",
+            action_label: "Discard and quit",
+        },
+        move |window| {
+            if window.get_busy() {
+                window.set_status_detail(blocked_quit_detail(window).into());
+
+                return;
+            }
+
+            quit(window);
+        },
+    );
+
     false
-}
-
-fn confirm_discard_settings() -> bool {
-    let result = rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title("Discard unsaved settings and quit?")
-        .set_description("Your changes have not been saved. Cancel to return to Settings, or discard the changes and quit ShareR.")
-        .set_buttons(rfd::MessageButtons::OkCancelCustom(
-            "Discard and quit".to_owned(),
-            "Cancel".to_owned(),
-        ))
-        .show();
-
-    // Windows without common-controls-v6 uses native OK/Cancel labels and results.
-    result == rfd::MessageDialogResult::Ok
-        || result == rfd::MessageDialogResult::Custom("Discard and quit".to_owned())
 }
 
 const fn quit_decision(state: QuitState) -> QuitDecision {
@@ -1751,7 +1690,7 @@ const fn quit_decision(state: QuitState) -> QuitDecision {
 }
 
 fn present_error(window: &AppWindow, stage: FailureStage, error: &str) {
-    clear_last_receipt(window);
+    begin_artifact_attempt(window);
     window.set_busy(false);
     window.set_uploading(false);
     window.set_status_text(stage.status().into());

@@ -133,13 +133,15 @@ impl UploaderKind {
 
             Self::Catbox => "200 MB; GIF 20 MB · 2 years without access",
 
-            Self::Litterbox => "1 GB per file · 72 hours",
+            Self::Litterbox => "1 GB per file · 1, 12, 24 or 72 hours",
 
-            Self::Imgur => "Client ID required · Images only; API size limits apply",
+            Self::Imgur => {
+                "Client ID required · JPEG, PNG, GIF, APNG, TIFF · May compress images; unavailable in the UK"
+            }
 
             Self::Pixeldrain => "API key required · Free: 10 GB per file, 60 days without access",
 
-            Self::Sul => "Account key required · Size and retention depend on your account",
+            Self::Sul => "Account key required · Limits not publicly documented",
 
             Self::Vgy => {
                 "No longer offered: upload API could not be verified. Choose another provider."
@@ -234,6 +236,21 @@ impl UploaderKind {
             "{} only accepts images",
             self.name()
         );
+
+        if self == Self::Imgur {
+            anyhow::ensure!(
+                matches!(
+                    mime,
+                    "image/jpeg"
+                        | "image/jpg"
+                        | "image/png"
+                        | "image/gif"
+                        | "image/apng"
+                        | "image/tiff"
+                ),
+                "Imgur accepts JPEG, PNG, GIF, APNG and TIFF images; choose another provider for this file format"
+            );
+        }
 
         // Uguu publishes its exact limit in MiB. Other services have plan-specific
         // or ambiguous MB limits; their API remains authoritative for those sizes.
@@ -433,6 +450,37 @@ mod tests {
                 .is_err()
         );
         assert!(UploaderKind::Imgur.validate_payload("image/png", 1).is_ok());
+    }
+
+    #[test]
+    fn imgur_rejects_undocumented_formats_before_upload() {
+        for mime in [
+            "image/jpeg",
+            "image/jpg",
+            "image/png",
+            "image/gif",
+            "image/apng",
+            "image/tiff",
+        ] {
+            assert!(
+                UploaderKind::Imgur.validate_payload(mime, 42).is_ok(),
+                "{mime}"
+            );
+        }
+
+        for mime in [
+            "image/webp",
+            "image/svg+xml",
+            "image/avif",
+            "image/bmp",
+            "video/mp4",
+            "application/octet-stream",
+        ] {
+            assert!(
+                UploaderKind::Imgur.validate_payload(mime, 42).is_err(),
+                "{mime}"
+            );
+        }
     }
 
     #[test]

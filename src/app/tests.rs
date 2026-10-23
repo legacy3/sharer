@@ -501,6 +501,7 @@ fn history_upload_gates_reject_busy_unsaved_setup_stale_and_missing_sources() {
     window.set_settings_dirty(false);
     window.set_show_onboarding(false);
     history::refresh_current(&window, &storage, &history).unwrap();
+    history::wait_until_idle_for_test(&window, &history);
     window.invoke_upload_history_local(token);
     assert!(
         receiver.try_recv().is_err(),
@@ -530,6 +531,7 @@ fn history_upload_gates_reject_busy_unsaved_setup_stale_and_missing_sources() {
         "changed local path must not upload"
     );
     history::refresh_current(&window, &storage, &history).unwrap();
+    history::wait_until_idle_for_test(&window, &history);
     window.invoke_upload_history_local(window.get_history_rows().row_data(0).unwrap().action_token);
     assert!(
         receiver.try_recv().is_err(),
@@ -539,6 +541,7 @@ fn history_upload_gates_reject_busy_unsaved_setup_stale_and_missing_sources() {
 
     removed.id = storage.insert_history(&removed).unwrap();
     history::refresh_current(&window, &storage, &history).unwrap();
+    history::wait_until_idle_for_test(&window, &history);
     let removed_token = window.get_history_rows().row_data(0).unwrap().action_token;
 
     storage.remove_history(removed.id).unwrap();
@@ -552,6 +555,7 @@ fn history_upload_gates_reject_busy_unsaved_setup_stale_and_missing_sources() {
     uploaded.link = "https://public.example/already-uploaded".into();
     uploaded.id = storage.insert_history(&uploaded).unwrap();
     history::refresh_current(&window, &storage, &history).unwrap();
+    history::wait_until_idle_for_test(&window, &history);
     let uploaded_id = uploaded.id.to_string();
     let uploaded_token = window
         .get_history_rows()
@@ -796,20 +800,34 @@ fn closing_to_tray_preserves_settings_and_setup_drafts() {
 fn cancelled_quit_returns_to_settings_without_discarding_the_draft() {
     slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
     let window = AppWindow::new().unwrap();
+    let quit_count = Rc::new(Cell::new(0));
+    let cancelled_count = Rc::clone(&quit_count);
 
     window.set_uploader_url("https://unsaved.example/upload".into());
     window.set_settings_dirty(true);
     window.set_current_page(0);
 
-    assert!(!super::may_quit_with_draft(&window, || false));
+    assert!(!super::may_quit_with_draft(&window, move |_| {
+        cancelled_count.set(cancelled_count.get() + 1);
+    }));
+    assert!(window.get_confirmation_visible());
+    window.invoke_confirmation_response(false);
+    window.invoke_confirmation_response(true);
+    assert_eq!(quit_count.get(), 0);
     assert!(window.window().is_visible());
     assert_eq!(window.get_current_page(), 2);
     assert!(window.get_settings_dirty());
     assert_eq!(window.get_uploader_url(), "https://unsaved.example/upload");
-    assert!(super::may_quit_with_draft(&window, || true));
+    let accepted_count = Rc::clone(&quit_count);
 
+    assert!(!super::may_quit_with_draft(&window, move |_| {
+        accepted_count.set(accepted_count.get() + 1);
+    }));
+    window.invoke_confirmation_response(true);
+    window.invoke_confirmation_response(true);
+    assert_eq!(quit_count.get(), 1);
     window.set_settings_dirty(false);
-    assert!(super::may_quit_with_draft(&window, || {
+    assert!(super::may_quit_with_draft(&window, |_| {
         panic!("saved settings must not trigger a discard prompt")
     }));
     window.hide().unwrap();
@@ -978,7 +996,7 @@ fn capture_completion_is_reported_when_preparation_fails() {
 }
 
 #[test]
-fn deleted_history_file_invalidates_persisted_latest_activity_by_id_or_path() {
+fn deleted_history_file_invalidates_latest_activity_only_when_the_path_matches() {
     let path = std::path::Path::new("C:/captures/latest.png");
     let activity = RefCell::new(Some(ActivitySnapshot {
         entry_id: 42,
@@ -990,11 +1008,16 @@ fn deleted_history_file_invalidates_persisted_latest_activity_by_id_or_path() {
         status: "Saved locally".to_owned(),
     }));
 
-    assert!(invalidate_activity_local_path(
+    assert!(!invalidate_activity_local_path(
         &activity,
         42,
         std::path::Path::new("C:/elsewhere/capture.png")
     ));
+    assert_eq!(
+        activity.borrow().as_ref().unwrap().local_path,
+        path.to_string_lossy()
+    );
+    assert!(invalidate_activity_local_path(&activity, 42, path));
     assert_eq!(activity.borrow().as_ref().unwrap().local_path, "");
     assert!(
         activity
@@ -1353,6 +1376,286 @@ fn mp4_setting_round_trips_and_marks_settings_dirty() {
 }
 
 #[test]
+fn settings_mode_changes_preserve_drafts_without_blocking_captures() {
+    use crate::views::settings;
+    use sharer::config::{AppConfig, CaptureNameMode, SettingsMode, TrayClickAction};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Rc::new(PlatformStorage::open_in(directory.path()).unwrap());
+    let mut saved = AppConfig {
+        uploader_kind: UploaderKind::Custom,
+        uploader_url: "https://uploads.example.test/upload".to_owned(),
+        upload_header_name: "Authorization".to_owned(),
+        upload_header_value: "fake-existing-secret".to_owned(),
+        upload_header_endpoint: Some("https://uploads.example.test/upload".to_owned()),
+        lifetime_seconds: 43_200,
+        recording_fps: 48,
+        recording_max_seconds: 900,
+        recording_max_gib: 3,
+        capture_directory: directory.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+
+    saved.behavior.onboarding_complete = true;
+    saved.behavior.tray_click_action = TrayClickAction::Show;
+    saved.privacy.require_tor = true;
+    saved.capture_naming.mode = CaptureNameMode::Custom;
+    saved.capture_naming.custom_name = "project".to_owned();
+    saved.save(storage.as_ref()).unwrap();
+    settings::initialize(&window, &saved);
+    let config = Rc::new(RefCell::new(saved.clone()));
+    let hotkeys = Rc::new(RefCell::new(None));
+    let hotkey_status = Rc::new(RefCell::new(String::new()));
+
+    settings::wire_dirty_callback(&window, &config);
+    super::preferences::wire_settings_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    window.set_advanced_settings(true);
+    window.invoke_settings_mode_changed(true);
+    window.invoke_settings_edited();
+    assert!(!window.get_settings_dirty());
+    assert!(window.get_save_captures() && !window.get_busy());
+    saved.settings_mode = SettingsMode::Advanced;
+    assert_eq!(*config.borrow(), saved);
+    assert_eq!(AppConfig::load(storage.as_ref()).unwrap(), saved);
+    assert_eq!(settings::config_from_window(&window).unwrap(), saved);
+    window.set_recording_fps(24);
+    window.set_recording_max_seconds(360);
+    window.set_lifetime_seconds(5400);
+    window.set_upload_header_value("fake-edited-secret".into());
+    window.set_require_tor(false);
+    window.set_capture_custom_name("edited-project".into());
+    window.set_advanced_settings(false);
+    window.invoke_settings_mode_changed(false);
+    window.invoke_settings_edited();
+    saved.settings_mode = SettingsMode::Simple;
+    assert!(window.get_settings_dirty());
+    assert_eq!(*config.borrow(), saved);
+    assert_eq!(AppConfig::load(storage.as_ref()).unwrap(), saved);
+    let simple_draft = settings::config_from_window(&window).unwrap();
+
+    assert_eq!(simple_draft.recording_fps, 24);
+    assert_eq!(simple_draft.recording_max_seconds, 360);
+    assert_eq!(simple_draft.lifetime_seconds, 5400);
+    assert_eq!(simple_draft.upload_header_value, "fake-edited-secret");
+    assert!(!simple_draft.privacy.require_tor);
+    assert_eq!(simple_draft.capture_naming.custom_name, "edited-project");
+    window.set_advanced_settings(true);
+    window.invoke_settings_mode_changed(true);
+    saved.settings_mode = SettingsMode::Advanced;
+    assert_eq!(AppConfig::load(storage.as_ref()).unwrap(), saved);
+    let mut advanced_draft = settings::config_from_window(&window).unwrap();
+
+    advanced_draft.settings_mode = SettingsMode::Simple;
+    assert_eq!(advanced_draft, simple_draft);
+    window.invoke_discard_settings();
+    assert!(window.get_advanced_settings());
+    assert!(!window.get_settings_dirty());
+    assert_eq!(settings::config_from_window(&window).unwrap(), saved);
+    window.set_recording_fps(60);
+    window.invoke_save_settings();
+    saved.recording_fps = 60;
+    assert_eq!(*config.borrow(), saved);
+    assert_eq!(AppConfig::load(storage.as_ref()).unwrap(), saved);
+    assert!(!window.get_settings_dirty());
+    window.set_advanced_settings(false);
+    window.invoke_settings_mode_changed(false);
+    saved.settings_mode = SettingsMode::Simple;
+    assert_eq!(*config.borrow(), saved);
+    assert_eq!(AppConfig::load(storage.as_ref()).unwrap(), saved);
+}
+
+#[test]
+fn uploader_readiness_validates_custom_target_without_validating_capture_preferences() {
+    use crate::views::settings;
+    use sharer::config::AppConfig;
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let mut config = AppConfig {
+        uploader_kind: UploaderKind::Custom,
+        uploader_url: "https://uploads.example.test/upload".to_owned(),
+        ..AppConfig::default()
+    };
+
+    config.behavior.auto_upload_captures = false;
+    settings::initialize(&window, &config);
+    settings::wire_dirty_callback(&window, &Rc::new(RefCell::new(config)));
+    assert!(window.get_uploader_configured());
+
+    for endpoint in [
+        "",
+        "not a URL",
+        "file:///tmp/upload",
+        "ftp://uploads.example.test/upload",
+    ] {
+        window.set_uploader_url(endpoint.into());
+        window.invoke_settings_edited();
+        assert!(!window.get_uploader_configured());
+        assert!(settings::config_from_window(&window).is_ok());
+    }
+
+    window.set_uploader_url("https://uploads.example.test/upload".into());
+    window.set_upload_header_name("Bad Header".into());
+    window.set_upload_header_value("fake-secret".into());
+    window.set_upload_header_endpoint("https://uploads.example.test/upload".into());
+    window.invoke_settings_edited();
+    assert!(!window.get_uploader_configured());
+    window.set_upload_header_name("Authorization".into());
+    window.set_upload_header_endpoint("https://other.example.test/upload".into());
+    window.invoke_settings_edited();
+    assert!(!window.get_uploader_configured());
+    window.set_upload_header_endpoint("https://uploads.example.test/upload".into());
+    window.invoke_settings_edited();
+    assert!(window.get_uploader_configured());
+    window.set_recording_fps(0);
+    window.set_require_tor(true);
+    window.set_force_require_proxy(true);
+    window.invoke_settings_edited();
+    assert!(window.get_uploader_configured());
+    assert!(settings::config_from_window(&window).is_err());
+}
+
+#[test]
+fn uploader_readiness_rejects_whitespace_credentials_and_accepts_accountless_providers() {
+    use crate::views::settings;
+    use sharer::config::AppConfig;
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+
+    for kind in UploaderKind::AVAILABLE {
+        if kind == UploaderKind::Custom {
+            continue;
+        }
+
+        let mut config = AppConfig {
+            uploader_kind: kind,
+            ..AppConfig::default()
+        };
+
+        config
+            .uploader_credentials
+            .set_for_provider(kind, " \t\n ".to_owned());
+        settings::initialize(&window, &config);
+        assert_eq!(
+            window.get_uploader_configured(),
+            !kind.requires_credential()
+        );
+        config
+            .uploader_credentials
+            .set_for_provider(kind, "fake-provider-credential".to_owned());
+        settings::initialize(&window, &config);
+        assert!(window.get_uploader_configured());
+    }
+
+    for kind in [UploaderKind::Vgy, UploaderKind::TransferSh] {
+        let config = AppConfig {
+            uploader_kind: kind,
+            ..AppConfig::default()
+        };
+
+        settings::initialize(&window, &config);
+        assert!(!window.get_uploader_configured());
+    }
+}
+
+#[test]
+fn forced_proxy_session_does_not_rewrite_the_saved_proxy_preference() {
+    use crate::views::settings;
+    use sharer::config::AppConfig;
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let saved = Rc::new(RefCell::new(AppConfig::default()));
+
+    window.set_force_require_proxy(true);
+    settings::initialize(&window, &saved.borrow());
+    settings::wire_dirty_callback(&window, &saved);
+
+    for advanced in [false, true] {
+        window.set_advanced_settings(advanced);
+        window.invoke_settings_edited();
+        assert!(window.get_force_require_proxy());
+        assert!(!window.get_require_tor());
+        assert!(!window.get_settings_dirty());
+        assert!(
+            !settings::config_from_window(&window)
+                .unwrap()
+                .privacy
+                .require_tor
+        );
+    }
+}
+
+#[test]
+fn settings_edits_replace_stale_confirmation_but_preserve_results_and_errors() {
+    use crate::views::settings;
+    use sharer::config::AppConfig;
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let saved = Rc::new(RefCell::new(AppConfig::default()));
+
+    settings::initialize(&window, &saved.borrow());
+    settings::wire_dirty_callback(&window, &saved);
+    window.set_artifact_status_text("Uploaded".into());
+    window.set_artifact_status_detail("Saved locally and uploaded".into());
+
+    for (status, detail) in [
+        ("Ready", "Settings saved"),
+        (
+            "Changes discarded",
+            "Settings match the saved configuration",
+        ),
+    ] {
+        window.set_status_text(status.into());
+        window.set_status_detail(detail.into());
+        window.set_recording_fps(24);
+        window.invoke_settings_edited();
+        assert!(window.get_settings_dirty());
+        assert_eq!(window.get_status_text(), "Unsaved settings");
+        assert_eq!(window.get_artifact_status_text(), "Uploaded");
+        assert_eq!(
+            window.get_artifact_status_detail(),
+            "Saved locally and uploaded"
+        );
+        window.set_recording_fps(saved.borrow().recording_fps.cast_signed());
+        window.invoke_settings_edited();
+        assert!(!window.get_settings_dirty());
+        assert_eq!(window.get_status_text(), "Ready");
+        assert_eq!(
+            window.get_status_detail(),
+            "Settings match the saved configuration"
+        );
+    }
+
+    for (status, detail) in [
+        ("Settings not saved", "The custom endpoint needs HTTPS"),
+        ("Uploaded", "Copied the public link"),
+        ("Capture failed", "Screen access is unavailable"),
+    ] {
+        window.set_status_text(status.into());
+        window.set_status_detail(detail.into());
+        window.set_recording_fps(24);
+        window.invoke_settings_edited();
+        assert_eq!(window.get_status_text(), status);
+        assert_eq!(window.get_status_detail(), detail);
+        window.set_recording_fps(saved.borrow().recording_fps.cast_signed());
+        window.invoke_settings_edited();
+        assert_eq!(window.get_status_text(), status);
+        assert_eq!(window.get_status_detail(), detail);
+    }
+}
+
+#[test]
 fn gui_endpoint_edits_clear_saved_headers_and_queued_targets_keep_their_destination() {
     use crate::views::settings;
     use sharer::config::AppConfig;
@@ -1426,7 +1729,7 @@ fn repeated_hover_does_not_trigger_redundant_snap_updates() {
 }
 
 #[test]
-fn capture_completion_releases_stop_control_and_failure_clears_receipt_capabilities() {
+fn capture_completion_releases_stop_control_and_failure_preserves_previous_receipt() {
     slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
     let window = AppWindow::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
@@ -1435,6 +1738,7 @@ fn capture_completion_releases_stop_control_and_failure_clears_receipt_capabilit
     let (stop_tx, _stop_rx) = std::sync::mpsc::channel();
     let state = super::PollingState {
         activity: Rc::new(RefCell::new(None)),
+        preview: RefCell::new(super::preview::Previewer::new()),
         hotkeys: Rc::new(RefCell::new(None)),
         job_tx: std::sync::mpsc::channel().0,
         result_rx,
@@ -1467,6 +1771,15 @@ fn capture_completion_releases_stop_control_and_failure_clears_receipt_capabilit
     window.set_last_local_path("previous.webp".into());
     window.set_last_delete_url("https://delete.example/fake-capability".into());
     window.set_last_delete_saved(true);
+    *state.activity.borrow_mut() = Some(ActivitySnapshot {
+        entry_id: 7,
+        delete_url: "https://delete.example/fake-capability".to_owned(),
+        detail: "Link ready to copy".to_owned(),
+        history_saved: true,
+        link: "https://public.example/previous".to_owned(),
+        local_path: "previous.webp".to_owned(),
+        status: "Uploaded".to_owned(),
+    });
     result_tx
         .send(super::JobResult::Error {
             message: "capture unavailable".to_owned(),
@@ -1476,17 +1789,24 @@ fn capture_completion_releases_stop_control_and_failure_clears_receipt_capabilit
     super::receive_job_result(&window, &state.result_rx, &state, &mut status);
 
     assert!(!window.get_busy());
-    assert!(window.get_last_link().is_empty());
-    assert!(window.get_last_local_path().is_empty());
-    assert!(window.get_last_delete_url().is_empty());
-    assert!(!window.get_last_delete_saved());
+    assert_eq!(window.get_last_link(), "https://public.example/previous");
+    assert_eq!(window.get_last_local_path(), "previous.webp");
+    assert_eq!(
+        window.get_last_delete_url(),
+        "https://delete.example/fake-capability"
+    );
+    assert!(window.get_last_delete_saved());
+    assert!(window.get_artifact_is_previous());
     let activity = state.activity.borrow();
     let activity = activity.as_ref().unwrap();
 
-    assert!(activity.link.is_empty());
-    assert!(activity.local_path.is_empty());
-    assert!(activity.delete_url.is_empty());
-    assert!(!activity.history_saved);
+    assert_eq!(activity.link, "https://public.example/previous");
+    assert_eq!(activity.local_path, "previous.webp");
+    assert_eq!(
+        activity.delete_url,
+        "https://delete.example/fake-capability"
+    );
+    assert!(activity.history_saved);
 }
 
 #[test]
@@ -1554,6 +1874,7 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
             clipboard: String::new(),
         },
         lifetime_seconds: 90,
+        litterbox_retention: sharer::upload::LitterboxRetention::TwelveHours,
         ..AppConfig::default()
     };
 
@@ -1577,6 +1898,8 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
 
     window.invoke_onboarding_restart();
     assert!(window.get_show_onboarding());
+    window.set_wizard_provider(UploaderKind::Litterbox.index());
+    window.set_wizard_litterbox_retention(0);
     window.set_wizard_provider(-1);
     window.set_wizard_start_at_login(true);
     window.set_wizard_imgur_credential("unsaved-key".into());
@@ -1586,6 +1909,7 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
     assert_eq!(storage.read("application").unwrap(), saved_bytes);
     assert_eq!(window.get_imgur_credential().as_str(), "fake-imgur-id");
     assert!(!window.get_start_at_login());
+    assert_eq!(window.get_litterbox_retention(), 1);
 
     window.invoke_onboarding_restart();
     window.set_wizard_uploader_url("not a URL".into());
@@ -1615,6 +1939,7 @@ fn setup_replay_cancel_preserves_saved_settings_and_invalid_drafts_are_recoverab
     assert_eq!(committed.upload_header_value, "fake-new-key");
     assert_eq!(committed.uploader_credentials, saved.uploader_credentials);
     assert_eq!(committed.lifetime_seconds, 90);
+    assert_eq!(committed.litterbox_retention, saved.litterbox_retention);
     assert!(!committed.behavior.completion_sound);
 }
 
@@ -1656,6 +1981,123 @@ fn settings_reset_is_a_draft_and_preserves_connections_and_capture_folder() {
     assert!(draft.behavior.completion_sound);
     assert!(!window.get_auto_upload_captures());
     assert!(!window.get_completion_sound());
+}
+
+#[test]
+fn reset_opens_review_without_mutation_and_cancel_preserves_config_files_and_history() {
+    use crate::views::settings;
+    use sharer::config::AppConfig;
+    use sharer::storage::Storage as _;
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Rc::new(PlatformStorage::open_in(directory.path()).unwrap());
+    let capture = local_history_capture(directory.path(), storage.as_ref());
+    let mut saved = AppConfig {
+        capture_directory: directory
+            .path()
+            .join("captures")
+            .to_string_lossy()
+            .into_owned(),
+        ..AppConfig::default()
+    };
+
+    saved.behavior.onboarding_complete = true;
+    saved.behavior.auto_upload_captures = false;
+    saved.behavior.completion_sound = false;
+    saved.save(storage.as_ref()).unwrap();
+    let saved_bytes = storage.read("application").unwrap();
+    let config = Rc::new(RefCell::new(saved.clone()));
+    let hotkeys = Rc::new(RefCell::new(None));
+    let hotkey_status = Rc::new(RefCell::new(String::new()));
+
+    settings::initialize(&window, &saved);
+    super::onboarding::wire_onboarding_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    window.set_confirmation_visible(true);
+    window.invoke_reset_settings();
+    assert!(!window.get_show_onboarding());
+    window.set_confirmation_visible(false);
+    window.invoke_reset_settings();
+    assert!(window.get_show_onboarding());
+    assert!(window.get_onboarding_reset());
+    assert!(window.get_wizard_sound());
+    assert!(!window.get_completion_sound());
+    assert_eq!(*config.borrow(), saved);
+    assert_eq!(storage.read("application").unwrap(), saved_bytes);
+    assert_eq!(
+        storage.history_entry(capture.id).unwrap().as_ref(),
+        Some(&capture)
+    );
+    assert_eq!(std::fs::read(&capture.local_path).unwrap(), [1, 2, 3]);
+    window.set_wizard_provider(-1);
+    window.set_wizard_start_at_login(true);
+    window.invoke_onboarding_skip();
+    assert!(!window.get_show_onboarding());
+    assert_eq!(*config.borrow(), saved);
+    assert_eq!(storage.read("application").unwrap(), saved_bytes);
+    assert_eq!(storage.history_count().unwrap(), 1);
+    assert_eq!(
+        storage.history_entry(capture.id).unwrap().as_ref(),
+        Some(&capture)
+    );
+    assert_eq!(std::fs::read(&capture.local_path).unwrap(), [1, 2, 3]);
+    assert!(!window.get_start_at_login());
+}
+
+#[test]
+fn first_launch_continue_and_finish_keep_captures_local_by_default() {
+    use crate::views::settings;
+    use sharer::config::AppConfig;
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Rc::new(PlatformStorage::open_in(directory.path()).unwrap());
+    let original = AppConfig {
+        capture_directory: directory.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+    let config = Rc::new(RefCell::new(original.clone()));
+    let hotkeys = Rc::new(RefCell::new(None));
+    let hotkey_status = Rc::new(RefCell::new(String::new()));
+
+    settings::initialize(&window, &original);
+    super::onboarding::wire_onboarding_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    assert_eq!(window.get_wizard_provider(), -1);
+    assert!(!window.get_wizard_auto_upload());
+    assert!(window.get_wizard_save_captures());
+    window.set_wizard_provider(UploaderKind::Catbox.index());
+    assert!(!window.get_wizard_auto_upload());
+    let manual_destination = settings::wizard_config_from_window(&window, &original).unwrap();
+
+    assert_eq!(manual_destination.uploader_kind, UploaderKind::Catbox);
+    assert!(!manual_destination.behavior.auto_upload_captures);
+    assert!(manual_destination.behavior.save_captures);
+    settings::initialize_wizard(&window, &original, false);
+    window.invoke_onboarding_continue();
+    assert_eq!(window.get_onboarding_step(), 1);
+    assert!(window.get_onboarding_error().is_empty());
+    assert_eq!(*config.borrow(), original);
+    window.invoke_onboarding_finish();
+    let committed = AppConfig::load(storage.as_ref()).unwrap();
+
+    assert!(committed.behavior.onboarding_complete);
+    assert!(committed.behavior.save_captures);
+    assert!(!committed.behavior.auto_upload_captures);
+    assert!(!window.get_show_onboarding());
 }
 
 #[test]
@@ -1782,6 +2224,8 @@ fn replay_supports_every_provider_and_local_only_keeps_connection_secrets() {
         saved.uploader_kind = kind;
         settings::initialize_wizard(&window, &saved, false);
         assert_eq!(window.get_wizard_provider(), index);
+        assert!(window.get_wizard_auto_upload());
+        assert!(!window.get_wizard_save_captures());
         assert_eq!(
             settings::wizard_config_from_window(&window, &saved).unwrap(),
             saved
@@ -1799,6 +2243,16 @@ fn replay_supports_every_provider_and_local_only_keeps_connection_secrets() {
     assert_eq!(local.uploader_credentials, saved.uploader_credentials);
     assert_eq!(local.uploader_url, saved.uploader_url);
     assert_eq!(local.upload_header_value, saved.upload_header_value);
+    saved.behavior.auto_upload_captures = false;
+    saved.behavior.save_captures = true;
+    settings::initialize_wizard(&window, &saved, false);
+    assert_eq!(window.get_wizard_provider(), -1);
+    assert!(!window.get_wizard_auto_upload());
+    assert!(window.get_wizard_save_captures());
+    assert_eq!(
+        settings::wizard_config_from_window(&window, &saved).unwrap(),
+        saved
+    );
 }
 
 #[test]
@@ -1816,6 +2270,9 @@ fn unsaved_settings_and_open_setup_cannot_start_capture_or_upload_jobs() {
     window.set_busy(true);
     assert!(!super::can_start_job(&window));
     window.set_busy(false);
+    window.set_confirmation_visible(true);
+    assert!(!super::can_start_job(&window));
+    window.set_confirmation_visible(false);
     assert!(super::can_start_job(&window));
 }
 
@@ -1838,6 +2295,7 @@ fn wizard_custom_headers_require_explicit_authorization_for_a_new_endpoint() {
 
     settings::initialize(&window, &saved);
     settings::wire_dirty_callback(&window, &Rc::new(RefCell::new(saved.clone())));
+    window.set_wizard_provider(UploaderKind::Custom.index());
     window.set_wizard_uploader_url("https://other.example.test/upload".into());
     assert!(settings::wizard_config_from_window(&window, &saved).is_err());
     window.invoke_wizard_endpoint_edited();
@@ -1854,4 +2312,175 @@ fn wizard_custom_headers_require_explicit_authorization_for_a_new_endpoint() {
     );
     assert_eq!(authorized.upload_header_value, "fake-new-key");
     assert_eq!(saved.upload_header_value, "fake-saved-key");
+}
+
+#[test]
+fn litterbox_settings_preserve_custom_expiry_and_queue_the_selected_retention() {
+    use crate::views::settings;
+    use sharer::{config::AppConfig, upload::LitterboxRetention};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let directory = tempfile::tempdir().unwrap();
+
+    for seconds in [0, 90] {
+        let window = AppWindow::new().unwrap();
+        let mut saved = AppConfig {
+            uploader_kind: UploaderKind::Litterbox,
+            lifetime_seconds: seconds,
+            capture_directory: directory.path().to_string_lossy().into_owned(),
+            ..AppConfig::default()
+        };
+
+        saved.behavior.onboarding_complete = true;
+        settings::initialize(&window, &saved);
+        let saved_config = Rc::new(RefCell::new(saved));
+
+        settings::wire_dirty_callback(&window, &saved_config);
+        assert_eq!(window.get_litterbox_retention(), 3);
+        window.set_litterbox_retention(1);
+        window.invoke_settings_edited();
+        assert!(window.get_settings_dirty());
+        let selected = settings::config_from_window(&window).unwrap();
+
+        assert_eq!(selected.lifetime_seconds, seconds);
+        assert_eq!(
+            selected.litterbox_retention,
+            LitterboxRetention::TwelveHours
+        );
+        *saved_config.borrow_mut() = selected.clone();
+        settings::initialize(&window, &selected);
+        assert!(!window.get_settings_dirty());
+        assert_eq!(window.get_litterbox_retention(), 1);
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        super::queue_job(
+            &window,
+            &sender,
+            JobSource::Clipboard,
+            Arc::new(UploadCancellation::default()),
+        );
+        let upload = receiver.try_recv().unwrap().upload.unwrap();
+
+        assert_eq!(
+            upload.uploader.litterbox_retention,
+            LitterboxRetention::TwelveHours
+        );
+        assert_eq!(upload.lifetime_seconds, seconds);
+        assert_eq!(window.get_status_detail().as_str(), "12 hours (requested)");
+    }
+}
+
+#[test]
+fn litterbox_wizard_changes_only_its_own_retention_when_selected() {
+    use crate::views::settings;
+    use sharer::{config::AppConfig, upload::LitterboxRetention};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let mut saved = AppConfig {
+        uploader_kind: UploaderKind::Litterbox,
+        lifetime_seconds: 90,
+        litterbox_retention: LitterboxRetention::TwelveHours,
+        capture_directory: directory.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+
+    saved.behavior.onboarding_complete = true;
+    settings::initialize_wizard(&window, &saved, false);
+    assert_eq!(window.get_wizard_litterbox_retention(), 1);
+    window.set_wizard_litterbox_retention(0);
+    let applied = settings::wizard_config_from_window(&window, &saved).unwrap();
+
+    assert_eq!(applied.litterbox_retention, LitterboxRetention::OneHour);
+    assert_eq!(applied.lifetime_seconds, 90);
+    assert_eq!(saved.litterbox_retention, LitterboxRetention::TwelveHours);
+
+    for provider in [-1, UploaderKind::Catbox.index()] {
+        window.set_wizard_provider(provider);
+        let other = settings::wizard_config_from_window(&window, &saved).unwrap();
+
+        assert_eq!(other.litterbox_retention, saved.litterbox_retention);
+        assert_eq!(other.lifetime_seconds, 90);
+    }
+
+    settings::initialize_wizard(&window, &saved, false);
+    window.set_wizard_litterbox_retention(4);
+    assert!(settings::wizard_config_from_window(&window, &saved).is_err());
+    let reset = settings::reset_preferences(&saved);
+
+    assert_eq!(
+        reset.litterbox_retention,
+        LitterboxRetention::SeventyTwoHours
+    );
+}
+
+#[test]
+fn litterbox_finish_save_and_discard_persist_only_confirmed_retention() {
+    use crate::views::settings;
+    use sharer::{config::AppConfig, storage::Storage as _, upload::LitterboxRetention};
+
+    slint::platform::set_platform(Box::new(SoftwareTestPlatform)).ok();
+    let window = AppWindow::new().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let storage = Rc::new(PlatformStorage::open_in(directory.path()).unwrap());
+    let mut saved = AppConfig {
+        uploader_kind: UploaderKind::Litterbox,
+        lifetime_seconds: 90,
+        capture_directory: directory.path().to_string_lossy().into_owned(),
+        ..AppConfig::default()
+    };
+
+    saved.behavior.onboarding_complete = true;
+    saved.save(storage.as_ref()).unwrap();
+    let config = Rc::new(RefCell::new(saved));
+    let hotkeys = Rc::new(RefCell::new(None));
+    let hotkey_status = Rc::new(RefCell::new(String::new()));
+
+    settings::initialize(&window, &config.borrow());
+    settings::wire_dirty_callback(&window, &config);
+    super::onboarding::wire_onboarding_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    super::preferences::wire_settings_callbacks(
+        &window,
+        &hotkeys,
+        &hotkey_status,
+        &config,
+        &storage,
+    );
+    window.invoke_onboarding_restart();
+    window.set_wizard_litterbox_retention(2);
+    window.invoke_onboarding_continue();
+    assert_eq!(window.get_onboarding_step(), 1);
+    window.invoke_onboarding_finish();
+    assert!(!window.get_show_onboarding());
+    let finished = AppConfig::load(storage.as_ref()).unwrap();
+
+    assert_eq!(
+        finished.litterbox_retention,
+        LitterboxRetention::TwentyFourHours
+    );
+    assert_eq!(finished.lifetime_seconds, 90);
+    assert_eq!(window.get_litterbox_retention(), 2);
+    let saved_bytes = storage.read("application").unwrap();
+
+    window.set_litterbox_retention(0);
+    window.invoke_settings_edited();
+    assert!(window.get_settings_dirty());
+    window.invoke_discard_settings();
+    assert_eq!(window.get_litterbox_retention(), 2);
+    assert_eq!(storage.read("application").unwrap(), saved_bytes);
+    window.set_litterbox_retention(1);
+    window.invoke_save_settings();
+    let applied = AppConfig::load(storage.as_ref()).unwrap();
+
+    assert_eq!(applied.litterbox_retention, LitterboxRetention::TwelveHours);
+    assert_eq!(applied.lifetime_seconds, 90);
+    assert_eq!(window.get_litterbox_retention(), 1);
+    assert!(!window.get_settings_dirty());
 }

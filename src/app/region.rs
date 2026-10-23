@@ -31,7 +31,7 @@ use sharer::{
 
 use super::{
     CAPTURE_HIDE_DELAY, FailureStage, Job, JobSource, RecordingControl, UploadOptions,
-    clear_last_receipt, present_error, upload_status_detail, valid_window_lifetime,
+    begin_artifact_attempt, present_error, upload_status_detail, valid_window_lifetime,
     valid_window_upload_target,
 };
 
@@ -111,10 +111,7 @@ pub(super) fn start_screenshot(
     };
     let restore_window = window.window().is_visible() && !window.window().is_minimized();
 
-    clear_last_receipt(window);
-    window.set_busy(true);
-    window.set_status_text("Select a region".into());
-    window.set_status_detail("Drag to capture a region, or press Esc to cancel".into());
+    begin_selection_activity(window, "Drag to capture a region, or press Esc to cancel");
     let _ = window.hide();
     let main_window = window.as_weak();
 
@@ -150,10 +147,7 @@ pub(super) fn start_screenshot(
                         }
 
                         Ok(None) => {
-                            window.set_busy(false);
-                            window.set_status_text("Ready".into());
-                            window.set_status_detail("Region selection cancelled".into());
-                            restore_window_if_needed(&window, restore_window);
+                            cancel_region_selection(&window, restore_window);
                         }
 
                         Err(error) => {
@@ -313,10 +307,7 @@ fn begin_region_selection(
     let capture_resolution = capture_resolution(window);
     let restore_window = window.window().is_visible() && !window.window().is_minimized();
 
-    clear_last_receipt(window);
-    window.set_busy(true);
-    window.set_status_text("Select a region".into());
-    window.set_status_detail("Drag across the preview  -  press Esc to cancel".into());
+    begin_selection_activity(window, "Drag across the preview  -  press Esc to cancel");
     let _ = window.hide();
     let main_window = window.as_weak();
 
@@ -439,15 +430,22 @@ fn show_region_selectors(
         let (x, y) = screen.selector_position();
         let (width, height) = screen.selector_dimensions();
 
+        // X11 needs the signed physical origin in its initial placement hints.
+        // Unlike size, Slint preserves a pre-creation physical position as-is.
+        // Wayland ignores this unsupported positioning request.
+        #[cfg(target_os = "linux")]
         selector
             .window()
             .set_position(slint::PhysicalPosition::new(x, y));
-        selector
-            .window()
-            .set_size(slint::PhysicalSize::new(width, height));
+
         let screen = Rc::new(screen);
 
-        wire_region_hover(&selector, Rc::clone(&screen));
+        wire_region_hover(
+            &selector,
+            Rc::clone(&screen),
+            #[cfg(target_os = "linux")]
+            main_window.as_weak(),
+        );
 
         let holders_for_selection = Rc::clone(&holders);
         let main_weak = main_window.as_weak();
@@ -465,39 +463,214 @@ fn show_region_selectors(
             );
         });
 
-        let holders_for_cancel = Rc::clone(&holders);
-        let main_weak = main_window.as_weak();
-        let restore_window = upload.restore_window;
-
-        selector.on_cancelled(move || {
-            dismiss_region_selectors(&holders_for_cancel);
-
-            if let Some(window) = main_weak.upgrade() {
-                window.set_busy(false);
-                window.set_status_text("Ready".into());
-                window.set_status_detail("Region selection cancelled".into());
-                restore_window_if_needed(&window, restore_window);
-            }
-        });
+        wire_region_cancel(&selector, main_window, &holders, upload.restore_window);
         wire_region_close(&selector);
 
-        if let Err(error) = selector.show() {
+        holders.borrow_mut().push(selector.clone_strong());
+
+        if let Err(error) = show_selector_when_ready(
+            selector,
+            main_window.as_weak(),
+            Rc::clone(&holders),
+            upload.restore_window,
+            (x, y, width, height),
+        ) {
             restore_window_if_needed(main_window, upload.restore_window);
             dismiss_region_selectors(&holders);
 
             present_error(
                 main_window,
                 FailureStage::Capture,
-                &format!("failed to show region selector: {error}"),
+                &format!("failed to initialize region selector: {error}"),
             );
 
             return;
         }
-
-        stabilize_selector_on_monitor(&selector, x, y, width, height);
-
-        holders.borrow_mut().push(selector);
     }
+}
+
+fn show_selector_when_ready(
+    selector: RegionWindow,
+    main_window: slint::Weak<AppWindow>,
+    holders: Rc<RefCell<Vec<RegionWindow>>>,
+    restore_window: bool,
+    bounds: (i32, i32, u32, u32),
+) -> Result<(), slint::EventLoopError> {
+    slint::spawn_local(async move {
+        // Before native creation Slint stores requested physical dimensions as
+        // logical dimensions at scale 1. Wait for the actual monitor scale so a
+        // 2200-pixel screen never becomes a 4400-pixel overlay at 200% scaling.
+        let initialized = selector.window().winit_window().await;
+
+        // Another monitor's selector may have been cancelled while this one
+        // initialized. Never show a new overlay after the group was dismissed.
+        if holders.borrow().is_empty() {
+            return;
+        }
+
+        let result = async {
+            #[cfg(target_os = "linux")]
+            let native_window = initialized?;
+
+            #[cfg(not(target_os = "linux"))]
+            initialized?;
+
+            let (x, y, width, height) = bounds;
+
+            selector
+                .window()
+                .set_position(slint::PhysicalPosition::new(x, y));
+            selector
+                .window()
+                .set_size(slint::PhysicalSize::new(width, height));
+
+            #[cfg(target_os = "linux")]
+            wait_for_x11_selector_size(&selector, &native_window, &holders, width, height).await?;
+
+            if holders.borrow().is_empty() {
+                return Ok(());
+            }
+
+            #[cfg(target_os = "linux")]
+            if is_x11_window(&native_window) {
+                // Slint intentionally restores decorations for native
+                // fullscreen windows. A managed, monitor-sized X11 overlay
+                // keeps no-frame stable through every property update.
+                selector.set_keep_above(true);
+                selector.show()?;
+                wait_for_x11_selector_visibility(&native_window, &holders).await?;
+
+                if !holders.borrow().is_empty() {
+                    // Reassert the level after mapping so the WM observes it
+                    // even if it ignored the pre-map EWMH state request.
+                    native_window.set_window_level(
+                        slint::winit_030::winit::window::WindowLevel::AlwaysOnTop,
+                    );
+                    native_window.focus_window();
+                    native_window.request_redraw();
+                }
+
+                return Ok(());
+            }
+
+            #[cfg(target_os = "linux")]
+            selector.show()?;
+
+            stabilize_selector_on_monitor(&selector, x, y, width, height);
+
+            #[cfg(not(target_os = "linux"))]
+            selector.show()?;
+
+            Ok::<_, slint::PlatformError>(())
+        }
+        .await;
+
+        if let Err(error) = result {
+            dismiss_region_selectors(&holders);
+
+            if let Some(main_window) = main_window.upgrade() {
+                restore_window_if_needed(&main_window, restore_window);
+                present_error(
+                    &main_window,
+                    FailureStage::Capture,
+                    &format!("failed to show region selector: {error}"),
+                );
+            }
+        }
+    })?;
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn is_x11_window(native_window: &slint::winit_030::winit::window::Window) -> bool {
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle as _, RawWindowHandle};
+
+    native_window.window_handle().is_ok_and(|handle| {
+        matches!(
+            handle.as_raw(),
+            RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_x11_selector_size(
+    selector: &RegionWindow,
+    native_window: &slint::winit_030::winit::window::Window,
+    holders: &Rc<RefCell<Vec<RegionWindow>>>,
+    width: u32,
+    height: u32,
+) -> Result<(), slint::PlatformError> {
+    use std::{future::poll_fn, task::Poll, time::Instant};
+
+    // Wayland may acknowledge size only after mapping. Only X11 needs this
+    // wait: its resize request returns before Slint processes native Resized.
+    if !is_x11_window(native_window) {
+        return Ok(());
+    }
+
+    let expected = slint::PhysicalSize::new(width, height);
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    poll_fn(|context| {
+        if holders.borrow().is_empty() {
+            return Poll::Ready(Ok(()));
+        }
+
+        let native_size = native_window.inner_size();
+
+        if selector.window().size() == expected
+            && native_size.width == width
+            && native_size.height == height
+        {
+            return Poll::Ready(Ok(()));
+        }
+
+        if Instant::now() >= deadline {
+            return Poll::Ready(Err(slint::PlatformError::from(
+                "the X11 region selector did not reach the monitor size in time",
+            )));
+        }
+
+        let waker = context.waker().clone();
+
+        slint::Timer::single_shot(Duration::from_millis(16), move || waker.wake());
+
+        Poll::Pending
+    })
+    .await
+}
+
+#[cfg(target_os = "linux")]
+async fn wait_for_x11_selector_visibility(
+    native_window: &slint::winit_030::winit::window::Window,
+    holders: &Rc<RefCell<Vec<RegionWindow>>>,
+) -> Result<(), slint::PlatformError> {
+    use std::{future::poll_fn, task::Poll, time::Instant};
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+
+    // Winit ignores X11 focus_window until VisibilityNotify acknowledges map.
+    // Wait for that state, never a fixed delay, and stop if any selector closes.
+    poll_fn(|context| {
+        if holders.borrow().is_empty() || native_window.is_visible() == Some(true) {
+            return Poll::Ready(Ok(()));
+        }
+
+        if Instant::now() >= deadline {
+            return Poll::Ready(Err(slint::PlatformError::from(
+                "the X11 region selector did not become visible in time",
+            )));
+        }
+
+        let waker = context.waker().clone();
+
+        slint::Timer::single_shot(Duration::from_millis(16), move || waker.wake());
+
+        Poll::Pending
+    })
+    .await
 }
 
 fn handle_region_selection(
@@ -611,7 +784,60 @@ fn stabilize_selector_on_monitor(
     selector.window().request_redraw();
 }
 
-fn wire_region_hover(selector: &RegionWindow, screen: Rc<capture::CapturedScreen>) {
+#[cfg(target_os = "linux")]
+fn synchronize_x11_selector_scale(
+    window: &slint::Window,
+    physical_size: slint::PhysicalSize,
+    scale_factor: f64,
+    inner_size_writer: &slint::winit_030::winit::event::InnerSizeWriter,
+) -> Result<(), slint::PlatformError> {
+    let mut writer = inner_size_writer.clone();
+
+    writer
+        .request_inner_size(slint::winit_030::winit::dpi::PhysicalSize::new(
+            physical_size.width,
+            physical_size.height,
+        ))
+        .map_err(|error| {
+            slint::PlatformError::from(format!(
+                "failed to keep the region selector on its monitor: {error}"
+            ))
+        })?;
+
+    // Winit can omit Resized when the physical size stays unchanged. Keep
+    // Slint's logical root consistent with its cached physical size before
+    // normal propagation; that still performs accessibility and input work.
+    if std::env::var("SLINT_SCALE_FACTOR").is_err() {
+        let scale_factor = scale_factor
+            .to_f32()
+            .filter(|scale| scale.is_finite() && *scale > 0.0)
+            .ok_or_else(|| {
+                slint::PlatformError::from("the monitor reported an unsupported display scale")
+            })?;
+
+        window
+            .try_dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor })
+            .map_err(|error| {
+                slint::PlatformError::from(format!(
+                    "failed to update the region display scale: {error}"
+                ))
+            })?;
+    }
+
+    window
+        .try_dispatch_event(slint::platform::WindowEvent::Resized {
+            size: window.size().to_logical(window.scale_factor()),
+        })
+        .map_err(|error| {
+            slint::PlatformError::from(format!("failed to resize the region preview: {error}"))
+        })
+}
+
+fn wire_region_hover(
+    selector: &RegionWindow,
+    screen: Rc<capture::CapturedScreen>,
+    #[cfg(target_os = "linux")] main_window: slint::Weak<AppWindow>,
+) {
     let selector_weak = selector.as_weak();
     let last_snap = Cell::new(None);
 
@@ -623,6 +849,30 @@ fn wire_region_hover(selector: &RegionWindow, screen: Rc<capture::CapturedScreen
             };
 
             match event {
+                #[cfg(target_os = "linux")]
+                slint::winit_030::winit::event::WindowEvent::ScaleFactorChanged {
+                    scale_factor,
+                    inner_size_writer,
+                } if slint_window.with_winit_window(is_x11_window) == Some(true) => {
+                    let (width, height) = screen.selector_dimensions();
+                    let result = synchronize_x11_selector_scale(
+                        slint_window,
+                        slint::PhysicalSize::new(width, height),
+                        *scale_factor,
+                        inner_size_writer,
+                    );
+
+                    if let Err(error) = result {
+                        selector.invoke_cancelled();
+
+                        if let Some(main_window) = main_window.upgrade() {
+                            present_error(&main_window, FailureStage::Capture, &error.to_string());
+                        }
+
+                        return slint::winit_030::EventResult::PreventDefault;
+                    }
+                }
+
                 slint::winit_030::winit::event::WindowEvent::CursorMoved { position, .. } => {
                     let overlay_size = slint_window.size();
 
@@ -674,6 +924,39 @@ fn update_selector_snap(
     }
 }
 
+fn begin_selection_activity(window: &AppWindow, detail: &str) {
+    // Selection is provisional. Preserve the artifact, including action feedback;
+    // a confirmed attempt keeps its recovery links until a replacement succeeds.
+    window.set_busy(true);
+    window.set_status_text("Select a region".into());
+    window.set_status_detail(detail.into());
+}
+
+fn cancel_region_selection(window: &AppWindow, restore_window: bool) {
+    window.set_busy(false);
+    window.set_status_text("Ready".into());
+    window.set_status_detail("Region selection cancelled".into());
+    restore_window_if_needed(window, restore_window);
+}
+
+fn wire_region_cancel(
+    selector: &RegionWindow,
+    main_window: &AppWindow,
+    holders: &Rc<RefCell<Vec<RegionWindow>>>,
+    restore_window: bool,
+) {
+    let holders = Rc::clone(holders);
+    let main_weak = main_window.as_weak();
+
+    selector.on_cancelled(move || {
+        dismiss_region_selectors(&holders);
+
+        if let Some(window) = main_weak.upgrade() {
+            cancel_region_selection(&window, restore_window);
+        }
+    });
+}
+
 fn wire_region_close(selector: &RegionWindow) {
     let selector_weak = selector.as_weak();
 
@@ -694,15 +977,16 @@ fn dismiss_region_selectors_then(
     holders: &Rc<RefCell<Vec<RegionWindow>>>,
     after_dismiss: impl FnOnce() + 'static,
 ) {
-    for selector in holders.borrow().iter() {
+    // Pending native-window initializers must observe cancellation immediately,
+    // while the components themselves stay alive until input dispatch ends.
+    let selectors = std::mem::take(&mut *holders.borrow_mut());
+
+    for selector in &selectors {
         let _ = selector.hide();
     }
 
-    // Defer component destruction until its active callback unwinds.
-    let holders = Rc::clone(holders);
-
     slint::Timer::single_shot(Duration::ZERO, move || {
-        holders.borrow_mut().clear();
+        drop(selectors);
         after_dismiss();
     });
 }
@@ -747,16 +1031,16 @@ pub(super) fn toggle_recording(
         return;
     }
 
-    if views::settings::recording_format(window) == RecordingFormat::Mp4
-        && crate::recording::ffmpeg::find().is_none()
-    {
-        super::ffmpeg_setup::show_missing(window);
+    if let Err(error) = capture::ensure_recording_supported() {
+        present_error(window, FailureStage::Capture, &error.to_string());
 
         return;
     }
 
-    if let Err(error) = capture::ensure_recording_supported() {
-        present_error(window, FailureStage::Capture, &error.to_string());
+    if views::settings::recording_format(window) == RecordingFormat::Mp4
+        && crate::recording::ffmpeg::find().is_none()
+    {
+        super::ffmpeg_setup::show_missing(window);
 
         return;
     }
@@ -796,6 +1080,7 @@ fn send_cropped_region_job(
     selection: capture::SelectedRegionCapture,
     upload: &RegionUpload,
 ) {
+    begin_artifact_attempt(window);
     window.set_upload_progress(0.0);
 
     if let Some(options) = &upload.upload {
@@ -853,6 +1138,7 @@ fn start_region_recording(
 ) {
     let (stop_sender, stop_receiver) = mpsc::channel();
 
+    begin_artifact_attempt(window);
     *recording_stop.borrow_mut() = Some(stop_sender);
     window.set_recording(true);
     window.set_busy(true);
@@ -892,3 +1178,6 @@ fn start_region_recording(
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

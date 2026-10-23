@@ -14,20 +14,37 @@ use slint::ComponentHandle as _;
 use crate::{AppWindow, recording::ffmpeg};
 
 pub(super) fn show_missing(window: &AppWindow) {
-    let message = match ffmpeg::install::source() {
+    show_missing_with_source(window, ffmpeg::install::source());
+}
+
+fn show_missing_with_source(window: &AppWindow, source: Result<ffmpeg::install::DownloadSource>) {
+    let available = source.is_ok();
+    let message = match source {
         Ok(source) => format!(
             "MP4 recording needs FFmpeg. Download it from {} into ShareR's own folder? No PATH changes or administrator access are needed. To use WebP instead, cancel and turn off MP4 recording.",
             source.provider
         ),
 
-        Err(error) => error.to_string(),
+        Err(error) => format!(
+            "{error}. You can also use animated WebP without FFmpeg: cancel and turn off MP4 recording in Settings → Capture."
+        ),
     };
 
     window.set_busy(true);
+    window.set_ffmpeg_download_available(available);
+    window.set_ffmpeg_cancelling(false);
+    window.set_ffmpeg_setup_failed(false);
     window.set_ffmpeg_setup_message(message.into());
     window.set_ffmpeg_setup_visible(true);
     window.set_status_text("FFmpeg required".into());
-    window.set_status_detail("Download FFmpeg or turn off MP4 to use WebP".into());
+    window.set_status_detail(
+        if available {
+            "Download FFmpeg or turn off MP4 to use WebP"
+        } else {
+            "Install FFmpeg manually or choose WebP in Settings → Capture"
+        }
+        .into(),
+    );
     let _ = window.show();
 }
 
@@ -39,8 +56,13 @@ pub(super) fn wire(window: &AppWindow, require_proxy: bool) {
     window.on_cancel_ffmpeg_setup(move || {
         if let Some(window) = weak.upgrade() {
             if window.get_ffmpeg_downloading() {
-                cancellation.store(true, Ordering::Release);
-                window.set_ffmpeg_setup_message("Cancelling download...".into());
+                if !window.get_ffmpeg_cancelling() {
+                    window.set_ffmpeg_cancelling(true);
+                    cancellation.store(true, Ordering::Release);
+                    window.set_ffmpeg_setup_message(
+                        "Cancelling setup and removing temporary files...".into(),
+                    );
+                }
             } else {
                 window.set_ffmpeg_setup_visible(false);
                 window.set_busy(false);
@@ -56,12 +78,17 @@ pub(super) fn wire(window: &AppWindow, require_proxy: bool) {
             return;
         };
 
-        if window.get_ffmpeg_downloading() || !window.get_ffmpeg_setup_visible() {
+        if window.get_ffmpeg_downloading()
+            || !window.get_ffmpeg_setup_visible()
+            || !window.get_ffmpeg_download_available()
+        {
             return;
         }
 
         cancelled.store(false, Ordering::Release);
         window.set_busy(true);
+        window.set_ffmpeg_cancelling(false);
+        window.set_ffmpeg_setup_failed(false);
         window.set_ffmpeg_downloading(true);
         window.set_ffmpeg_download_progress(0.0);
         window.set_ffmpeg_setup_message("Preparing the FFmpeg download...".into());
@@ -95,8 +122,7 @@ pub(super) fn wire(window: &AppWindow, require_proxy: bool) {
                             )
                         };
                         let _ = progress_window.upgrade_in_event_loop(move |window| {
-                            window.set_ffmpeg_download_progress(f32::from(progress) / 100.0);
-                            window.set_ffmpeg_setup_message(message.into());
+                            show_progress(&window, f32::from(progress) / 100.0, message);
                         });
                     });
                 let was_cancelled = cancellation.load(Ordering::Acquire);
@@ -111,28 +137,45 @@ pub(super) fn wire(window: &AppWindow, require_proxy: bool) {
     });
 }
 
+fn show_progress(window: &AppWindow, progress: f32, message: String) {
+    if window.get_ffmpeg_setup_visible()
+        && window.get_ffmpeg_downloading()
+        && !window.get_ffmpeg_cancelling()
+    {
+        window.set_ffmpeg_download_progress(progress);
+        window.set_ffmpeg_setup_message(message.into());
+    }
+}
+
 fn finish(window: &AppWindow, cancelled: bool, result: Result<PathBuf>) {
     window.set_ffmpeg_downloading(false);
+    window.set_ffmpeg_cancelling(false);
     window.set_ffmpeg_download_progress(0.0);
 
-    if cancelled {
-        window.set_ffmpeg_setup_visible(false);
-        window.set_busy(false);
-        window.set_status_text("FFmpeg setup cancelled".into());
-        window.set_status_detail("You can retry setup or use WebP".into());
-    } else {
-        match result {
-            Ok(_) => {
-                window.set_ffmpeg_setup_visible(false);
-                window.set_busy(false);
-                window.set_status_text("FFmpeg ready".into());
-                window.set_status_detail("Press Record to start an MP4 recording".into());
-            }
+    match result {
+        // Publishing the verified executable is the commit point. A late Cancel
+        // must not claim that an already installed encoder was rolled back.
+        Ok(_) => {
+            window.set_ffmpeg_setup_visible(false);
+            window.set_ffmpeg_setup_failed(false);
+            window.set_busy(false);
+            window.set_status_text("FFmpeg ready".into());
+            window.set_status_detail("Press Record to start an MP4 recording".into());
+        }
 
-            Err(error) => {
-                window.set_ffmpeg_setup_message(format!("FFmpeg setup failed: {error:#}. Retry Download, or cancel and turn off MP4 to use WebP.").into());
-                window.set_status_text("FFmpeg setup failed".into());
-            }
+        Err(_) if cancelled => {
+            window.set_ffmpeg_setup_visible(false);
+            window.set_ffmpeg_setup_failed(false);
+            window.set_busy(false);
+            window.set_status_text("FFmpeg setup cancelled".into());
+            window.set_status_detail("You can retry setup or use WebP".into());
+        }
+
+        Err(error) => {
+            window.set_ffmpeg_setup_failed(true);
+            window.set_ffmpeg_setup_message(format!("{error:#}. Retry the download, or cancel and turn off MP4 recording in Settings → Capture to use WebP.").into());
+            window.set_status_text("FFmpeg setup failed".into());
+            window.set_status_detail("Retry the download or cancel setup".into());
         }
     }
 }

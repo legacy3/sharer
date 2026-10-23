@@ -6,6 +6,7 @@ use std::{
     cell::RefCell,
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use anyhow::{Context as _, Result};
@@ -14,26 +15,42 @@ use slint::{ComponentHandle as _, Model as _, ModelRc, SharedString, VecModel};
 
 use crate::{AppWindow, HistoryRow};
 use sharer::{
-    history::{HistoryEntry, HistorySort, HistorySortColumn, SortDirection},
+    history::{HistoryEntry, HistoryFilter, HistorySort, HistorySortColumn, SortDirection},
     presentation::safe_text,
-    storage::PlatformStorage,
+    storage::{HistoryLocalPathReconciliation, PlatformStorage},
 };
 
 const PAGE_SIZE: usize = 25;
 
+mod worker;
+pub(crate) use worker::HistoryLoader;
+use worker::{HistoryEvent, Reply};
+
 pub(crate) type LocalDeletionObserver = Rc<dyn Fn(&AppWindow, i64, &Path)>;
 pub(crate) type HistoryRemovalObserver = Rc<dyn Fn(&AppWindow, i64)>;
 
+#[derive(Clone, Default)]
+struct HistorySearch {
+    query: String,
+    filter: HistoryFilter,
+}
+
 pub(crate) struct HistoryController {
     local_deleted: LocalDeletionObserver,
+    loader: Rc<RefCell<HistoryLoader>>,
+    poll_timer: slint::Timer,
     generation: u64,
     page: usize,
     total: u64,
     rows: Rc<VecModel<HistoryRow>>,
     sort: HistorySort,
+    search: HistorySearch,
     suspended: bool,
+    checking: bool,
+    loaded: bool,
 }
 
+#[cfg(test)]
 pub(crate) fn initialize(
     window: &AppWindow,
     storage: &Rc<PlatformStorage>,
@@ -41,20 +58,87 @@ pub(crate) fn initialize(
     local_deleted: &LocalDeletionObserver,
     history_removed: &HistoryRemovalObserver,
 ) -> Result<Rc<RefCell<HistoryController>>> {
+    let loader = Rc::new(RefCell::new(HistoryLoader::new(storage)?));
+    let controller = initialize_with_loader(
+        window,
+        storage,
+        suspended,
+        local_deleted,
+        history_removed,
+        &loader,
+    )?;
+
+    if !suspended {
+        wait_until_idle_for_test(window, &controller);
+    }
+
+    Ok(controller)
+}
+
+pub(crate) fn initialize_with_loader(
+    window: &AppWindow,
+    storage: &Rc<PlatformStorage>,
+    suspended: bool,
+    local_deleted: &LocalDeletionObserver,
+    history_removed: &HistoryRemovalObserver,
+    loader: &Rc<RefCell<HistoryLoader>>,
+) -> Result<Rc<RefCell<HistoryController>>> {
     let rows = Rc::new(VecModel::default());
     let controller = Rc::new(RefCell::new(HistoryController {
         local_deleted: Rc::clone(local_deleted),
-        generation: 0,
+        loader: Rc::clone(loader),
+        poll_timer: slint::Timer::default(),
+        generation: loader.borrow_mut().cancel()?,
         page: 0,
         total: 0,
         rows: Rc::clone(&rows),
         sort: HistorySort::default(),
+        search: HistorySearch::default(),
         suspended,
+        checking: false,
+        loaded: false,
     }));
 
     window.set_history_rows(ModelRc::from(rows));
     window.set_history_sort_column(HistorySort::default().column.index());
     window.set_history_sort_ascending(HistorySort::default().direction == SortDirection::Ascending);
+    window.set_history_checking(false);
+    window.set_history_checking_detail("".into());
+    window.set_history_load_message("".into());
+
+    let weak_window = window.as_weak();
+    let weak_controller = Rc::downgrade(&controller);
+
+    controller.borrow().poll_timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(16),
+        move || {
+            let (Some(window), Some(controller)) =
+                (weak_window.upgrade(), weak_controller.upgrade())
+            else {
+                return;
+            };
+            // Bound each UI turn even if the worker has finished several batches.
+
+            for _ in 0..4 {
+                let (loader, generation) = {
+                    let controller = controller.borrow();
+
+                    (Rc::clone(&controller.loader), controller.generation)
+                };
+
+                if !loader.borrow().is_current(generation) {
+                    break;
+                }
+
+                let Some(reply) = loader.borrow_mut().poll() else {
+                    break;
+                };
+
+                apply_reply(&window, &controller, reply);
+            }
+        },
+    );
 
     if !suspended {
         refresh(window, storage, &controller, 0)?;
@@ -76,7 +160,15 @@ pub(crate) fn observe_inserted(
 pub(crate) fn suspend(controller: &RefCell<HistoryController>) {
     let mut controller = controller.borrow_mut();
 
+    let cancellation = controller.loader.borrow_mut().cancel();
+
+    if let Ok(generation) = cancellation {
+        controller.generation = generation;
+    }
+
     controller.suspended = true;
+    controller.checking = false;
+    controller.loaded = false;
     controller.rows.set_vec(Vec::new());
 }
 
@@ -91,12 +183,16 @@ pub(crate) fn refresh_current(
 }
 
 pub(crate) fn resume_empty(window: &AppWindow, controller: &RefCell<HistoryController>) {
+    suspend(controller);
     let mut controller = controller.borrow_mut();
 
     controller.suspended = false;
     controller.page = 0;
     controller.total = 0;
     controller.rows.set_vec(Vec::new());
+    window.set_history_checking(false);
+    window.set_history_checking_detail("".into());
+    window.set_history_load_message("".into());
     update_pagination(window, &controller);
 }
 
@@ -123,6 +219,58 @@ fn wire_sort_callback(
     });
 }
 
+fn wire_search_callback(
+    window: &AppWindow,
+    storage: &Rc<PlatformStorage>,
+    controller: &Rc<RefCell<HistoryController>>,
+) {
+    let window_weak = window.as_weak();
+    let storage = Rc::clone(storage);
+    let controller = Rc::clone(controller);
+
+    window.on_history_query_changed(move |query, filter| {
+        let Some(filter) = HistoryFilter::from_index(filter) else {
+            return;
+        };
+        let Some(window) = window_weak.upgrade() else {
+            return;
+        };
+        let search = HistorySearch {
+            query: query.to_string(),
+            filter,
+        };
+        let sort = controller.borrow().sort;
+
+        {
+            let controller = controller.borrow();
+
+            if controller.search.query == search.query
+                && controller.search.filter == search.filter
+                && (controller.loaded || controller.checking)
+            {
+                return;
+            }
+        }
+
+        let requested_query = search.query.clone();
+
+        if let Err(error) = refresh_selection(&window, &storage, &controller, 0, sort, search) {
+            let controller = controller.borrow();
+
+            window.set_history_search_query(controller.search.query.as_str().into());
+            window.set_history_filter(controller.search.filter.index());
+            set_action_status(
+                &window,
+                format!("Could not search history: {error:#}"),
+                true,
+            );
+        } else {
+            window.set_history_search_query(requested_query.into());
+            window.set_history_filter(filter.index());
+        }
+    });
+}
+
 fn wire_callbacks(
     window: &AppWindow,
     storage: &Rc<PlatformStorage>,
@@ -131,13 +279,56 @@ fn wire_callbacks(
     history_removed: &HistoryRemovalObserver,
 ) {
     wire_sort_callback(window, storage, controller);
-    wire_link_callbacks(window, controller);
+    wire_search_callback(window, storage, controller);
+    wire_link_callbacks(window, storage, controller);
     wire_local_file_callbacks(window, controller);
     wire_removal_callbacks(window, storage, controller, local_deleted, history_removed);
     wire_pagination_callbacks(window, storage, controller);
+    wire_cancel_callback(window, controller);
 }
 
-fn wire_link_callbacks(window: &AppWindow, controller: &Rc<RefCell<HistoryController>>) {
+fn wire_cancel_callback(window: &AppWindow, controller: &Rc<RefCell<HistoryController>>) {
+    let weak_window = window.as_weak();
+    let controller = Rc::clone(controller);
+
+    window.on_history_cancel_check(move || {
+        let Some(window) = weak_window.upgrade() else {
+            return;
+        };
+        let loader = Rc::clone(&controller.borrow().loader);
+
+        match loader.borrow_mut().cancel() {
+            Ok(generation) => {
+                let mut controller = controller.borrow_mut();
+
+                controller.generation = generation;
+                controller.checking = false;
+                controller.loaded = false;
+                controller.rows.set_vec(Vec::new());
+                window.set_history_checking(false);
+                window.set_history_load_message("Search cancelled".into());
+                window.set_history_checking_detail(
+                    "Your history is kept. Retry or change the search.".into(),
+                );
+                window.set_history_page_label("Search cancelled".into());
+                window.set_history_has_previous(false);
+                window.set_history_has_next(false);
+            }
+
+            Err(error) => set_action_status(
+                &window,
+                format!("Could not cancel history search: {error:#}"),
+                true,
+            ),
+        }
+    });
+}
+
+fn wire_link_callbacks(
+    window: &AppWindow,
+    storage: &Rc<PlatformStorage>,
+    controller: &Rc<RefCell<HistoryController>>,
+) {
     let window_weak = window.as_weak();
     let controller_for_open = Rc::clone(controller);
 
@@ -183,30 +374,46 @@ fn wire_link_callbacks(window: &AppWindow, controller: &Rc<RefCell<HistoryContro
 
     let window_weak = window.as_weak();
     let controller_for_open_delete = Rc::clone(controller);
+    let storage_for_open_delete = Rc::clone(storage);
 
     window.on_open_history_delete(move |action_token| {
+        let Some(window) = window_weak.upgrade() else {
+            return;
+        };
         let Some(row) = row_by_token(&controller_for_open_delete, action_token.as_str()) else {
             return;
         };
 
-        if row.delete_link.is_empty() || !confirm_deletion_page() {
+        if row.delete_link.is_empty() {
             return;
         }
 
-        let result = open::that(row.delete_link.as_str());
-        let detail = deletion_page_status(&result);
+        let entry =
+            match confirmation_entry(&storage_for_open_delete, &controller_for_open_delete, &row) {
+                Ok(entry) => entry,
 
-        if let Some(window) = window_weak.upgrade() {
-            set_action_status(&window, detail, result.is_err());
-        }
+                Err(error) => {
+                    set_action_result(&window, Err(error));
+
+                    return;
+                }
+            };
+        let storage = Rc::clone(&storage_for_open_delete);
+        let controller = Rc::clone(&controller_for_open_delete);
+        let target = entry.filename.clone();
+
+        super::confirmation::deletion_page(&window, &target, move |window| {
+            if let Err(error) = confirm_unchanged_entry(&storage, &controller, &row, &entry) {
+                set_action_result(window, Err(error));
+
+                return;
+            }
+
+            let result = open::that(entry.delete_url.as_str());
+
+            set_action_status(window, deletion_page_status(&result), result.is_err());
+        });
     });
-}
-
-pub(crate) fn confirm_deletion_page() -> bool {
-    confirm(
-        "Open the deletion page?",
-        "This opens the host's deletion page in your browser. The uploaded file may be deleted immediately and cannot be restored. The local copy and history entry stay.",
-    )
 }
 
 pub(crate) fn deletion_page_status(result: &std::io::Result<()>) -> &'static str {
@@ -301,20 +508,38 @@ fn wire_removal_callbacks(
             return;
         };
 
-        if !confirm(
-            "Remove history entry?",
-            "This removes the record and its saved links from ShareR history, including the deletion link. Local and uploaded files are not deleted. Copy the deletion link first if you may need it later.",
-        ) {
-            return;
-        }
+        let entry = match confirmation_entry(&storage_for_remove, &controller_for_remove, &row) {
+            Ok(entry) => entry,
 
-        let result = history_id(&row).and_then(|id| {
-            storage_for_remove.remove_history(id)?;
-            history_removed(&window, id);
-            refresh_current(&window, &storage_for_remove, &controller_for_remove)
-        });
+            Err(error) => {
+                set_action_result(&window, Err(error));
 
-        set_action_result(&window, result.map(|()| "History entry removed".to_owned()));
+                return;
+            }
+        };
+        let storage = Rc::clone(&storage_for_remove);
+        let controller = Rc::clone(&controller_for_remove);
+        let history_removed = Rc::clone(&history_removed);
+        let target = entry.filename.clone();
+
+        super::confirmation::request(
+            &window,
+            &super::confirmation::Confirmation {
+                title: "Remove history entry?",
+                description: "This removes the record and its saved links from ShareR history, including the deletion link. Local and uploaded files are not deleted. Copy the deletion link first if you may need it later.",
+                target: &target,
+                action_label: "Remove from history",
+            },
+            move |window| {
+                let result = confirm_unchanged_entry(&storage, &controller, &row, &entry).and_then(|()| {
+                    storage.remove_history(entry.id)?;
+                    history_removed(window, entry.id);
+                    refresh_current(window, &storage, &controller)
+                });
+
+                set_action_result(window, result.map(|()| "History entry removed".to_owned()));
+            },
+        );
     });
 
     let window_weak = window.as_weak();
@@ -330,37 +555,117 @@ fn wire_removal_callbacks(
             return;
         };
 
-        if !confirm(
-            "Delete local file permanently?",
-            "This permanently deletes the local file from disk, without using the Recycle Bin or Trash. The uploaded copy and history entry stay.",
-        ) {
+        if row.local_path.is_empty() {
             return;
         }
 
-        match delete_local_capture(
-            &row,
-            DeleteLocalCallbacks {
-                mark_deleted: |id: i64, path: &Path| {
-                    clear_local_row(&controller_for_delete_local, &id.to_string());
-                    local_deleted_for_callback(&window, id, path);
-                },
-                clear_persisted: |id| storage_for_delete_local.clear_history_local_path(id),
+        let entry = match confirmation_entry(&storage_for_delete_local, &controller_for_delete_local, &row) {
+            Ok(entry) => entry,
+
+            Err(error) => {
+                set_action_result(&window, Err(error));
+
+                return;
+            }
+        };
+        let storage = Rc::clone(&storage_for_delete_local);
+        let controller = Rc::clone(&controller_for_delete_local);
+        let local_deleted = Rc::clone(&local_deleted_for_callback);
+        let target = entry.local_path.clone();
+
+        super::confirmation::request(
+            &window,
+            &super::confirmation::Confirmation {
+                title: "Delete local file permanently?",
+                description: "This permanently deletes the local file from disk, without using the Recycle Bin or Trash. The uploaded copy and history entry stay.",
+                target: &target,
+                action_label: "Delete permanently",
             },
-        ) {
-            Ok(None) => set_action_status(&window, "Local capture deleted", false),
+            move |window| {
+                if let Err(error) = confirm_unchanged_entry(&storage, &controller, &row, &entry) {
+                    set_action_result(window, Err(error));
 
-            Ok(Some(error)) => set_action_status(
-                &window,
-                format!(
-                    "Local capture deleted, but its history record could not be updated. \
-                     ShareR will reconcile it when this page reloads: {error:#}"
-                ),
-                true,
-            ),
+                    return;
+                }
 
-            Err(error) => set_action_result(&window, Err(error)),
-        }
+                finish_local_deletion(window, &storage, &controller, &local_deleted, &row);
+            },
+        );
     });
+}
+
+fn finish_local_deletion(
+    window: &AppWindow,
+    storage: &PlatformStorage,
+    controller: &RefCell<HistoryController>,
+    local_deleted: &LocalDeletionObserver,
+    row: &HistoryRow,
+) {
+    match delete_local_capture(
+        row,
+        DeleteLocalCallbacks {
+            mark_deleted: |id: i64, path: &Path| {
+                clear_local_row(controller, &id.to_string());
+                local_deleted(window, id, path);
+            },
+            clear_persisted: |id| storage.clear_history_local_path(id),
+        },
+    ) {
+        Ok(None) => {
+            let result = refresh_current(window, storage, controller)
+                .map(|()| "Local capture deleted".to_owned())
+                .context("Local capture deleted, but history could not be refreshed");
+
+            set_action_result(window, result);
+        }
+
+        Ok(Some(error)) => set_action_status(
+            window,
+            format!(
+                "Local capture deleted, but its history record could not be updated. \
+                 ShareR will reconcile it when this page reloads: {error:#}"
+            ),
+            true,
+        ),
+
+        Err(error) => set_action_result(window, Err(error)),
+    }
+}
+
+fn confirmation_entry(
+    storage: &PlatformStorage,
+    controller: &RefCell<HistoryController>,
+    expected_row: &HistoryRow,
+) -> Result<HistoryEntry> {
+    let row = row_by_token(controller, expected_row.action_token.as_str())
+        .context("History changed; select the item again")?;
+    let entry = storage
+        .history_entry(history_id(&row)?)?
+        .context("History changed; select the item again")?;
+
+    anyhow::ensure!(
+        entry.local_path == expected_row.local_path.as_str()
+            && entry.link == expected_row.link.as_str()
+            && entry.delete_url == expected_row.delete_link.as_str()
+            && safe_text(&entry.filename).as_ref() == expected_row.filename.as_str(),
+        "History changed; select the item again"
+    );
+
+    Ok(entry)
+}
+
+fn confirm_unchanged_entry(
+    storage: &PlatformStorage,
+    controller: &RefCell<HistoryController>,
+    row: &HistoryRow,
+    expected: &HistoryEntry,
+) -> Result<()> {
+    anyhow::ensure!(
+        confirmation_entry(storage, controller, row)? == *expected,
+        "History changed; select the item again"
+    );
+
+    Ok(())
 }
 
 fn wire_pagination_callbacks(
@@ -373,6 +678,10 @@ fn wire_pagination_callbacks(
     let controller_for_previous = Rc::clone(controller);
 
     window.on_history_previous(move || {
+        if controller_for_previous.borrow().checking {
+            return;
+        }
+
         let page = controller_for_previous.borrow().page.saturating_sub(1);
 
         if let Some(window) = window_weak.upgrade()
@@ -392,6 +701,10 @@ fn wire_pagination_callbacks(
     let controller_for_next = Rc::clone(controller);
 
     window.on_history_next(move || {
+        if controller_for_next.borrow().checking {
+            return;
+        }
+
         let page = controller_for_next.borrow().page.saturating_add(1);
 
         if let Some(window) = window_weak.upgrade()
@@ -420,62 +733,170 @@ fn refresh_with_sort(
     requested_page: usize,
     sort: HistorySort,
 ) -> Result<()> {
-    let total = storage.history_count()?;
-    let page_count = page_count(total);
-    let page = requested_page.min(page_count.saturating_sub(1));
-    let offset = page
-        .checked_mul(PAGE_SIZE)
-        .context("history page offset overflowed")?;
-    let mut entries = storage.history_page_sorted(offset, PAGE_SIZE, sort)?;
-    let original_local_paths = entries
-        .iter()
-        .filter(|entry| !entry.local_path.is_empty())
-        .map(|entry| (entry.id, PathBuf::from(&entry.local_path)))
-        .collect::<Vec<_>>();
-    let reconciliation = storage.reconcile_missing_history_local_paths(&mut entries)?;
-    let local_deleted = Rc::clone(&controller.borrow().local_deleted);
+    let search = controller.borrow().search.clone();
 
-    notify_reconciled_local_deletions(&original_local_paths, &entries, |id, path| {
-        local_deleted(window, id, path);
-    });
+    refresh_selection(window, storage, controller, requested_page, sort, search)
+}
+
+fn refresh_selection(
+    window: &AppWindow,
+    _storage: &PlatformStorage,
+    controller: &RefCell<HistoryController>,
+    requested_page: usize,
+    sort: HistorySort,
+    search: HistorySearch,
+) -> Result<()> {
+    let loader = Rc::clone(&controller.borrow().loader);
+    let generation =
+        loader
+            .borrow_mut()
+            .submit(requested_page, sort, search.query.clone(), search.filter)?;
     let mut controller = controller.borrow_mut();
-    let generation = controller
-        .generation
-        .checked_add(1)
-        .context("history view generation exhausted")?;
-    let rows = entries
-        .iter()
-        .map(|entry| row_from_entry(entry, generation))
-        .collect::<Vec<_>>();
 
     controller.generation = generation;
-
-    controller.page = page;
-    controller.total = total;
+    controller.page = requested_page;
     controller.sort = sort;
+    controller.search = search;
     controller.suspended = false;
-    controller.rows.set_vec(rows);
+    controller.checking = true;
+    controller.loaded = false;
+    // Drop every old action token immediately, before any asynchronous result arrives.
+    controller.rows.set_vec(Vec::new());
     window.set_history_sort_column(sort.column.index());
     window.set_history_sort_ascending(sort.direction == SortDirection::Ascending);
-    update_pagination(window, &controller);
-
-    if reconciliation.cleared != 0
-        || reconciliation.unavailable != 0
-        || reconciliation.not_regular != 0
-    {
-        window.set_status_detail(
-            format!(
-                "History warning: cleared {} confirmed missing local path(s); kept {} path(s) \
-                 that could not be checked and {} path(s) that are not regular files.",
-                reconciliation.cleared, reconciliation.unavailable, reconciliation.not_regular
-            )
-            .into(),
-        );
-    }
+    window.set_history_checking(true);
+    window.set_history_checking_detail("You can change the search or keep using ShareR.".into());
+    window.set_history_load_message("".into());
+    window.set_history_page_label("Checking history…".into());
+    window.set_history_has_previous(false);
+    window.set_history_has_next(false);
 
     Ok(())
 }
 
+fn history_search_matches(entry: &HistoryEntry, query: &str) -> bool {
+    let query = query.trim().as_bytes();
+
+    query.is_empty()
+        || [&entry.filename, &entry.link, &entry.local_path]
+            .into_iter()
+            .any(|value| {
+                value
+                    .as_bytes()
+                    .windows(query.len())
+                    .any(|part| part.eq_ignore_ascii_case(query))
+            })
+}
+
+fn apply_reply(window: &AppWindow, controller: &RefCell<HistoryController>, reply: Reply) {
+    match reply.event {
+        HistoryEvent::Progress { cleared, checked } => {
+            let observer = Rc::clone(&controller.borrow().local_deleted);
+
+            // These notifications describe committed changes even after cancellation.
+            for (id, path) in cleared {
+                observer(window, id, &path);
+            }
+
+            let controller = controller.borrow();
+
+            if reply.generation == controller.generation && controller.checking {
+                window.set_history_checking_detail(
+                    format!(
+                        "Checked {checked} history items. You can change the search or cancel."
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        HistoryEvent::Complete(result) => {
+            let mut controller = controller.borrow_mut();
+
+            if reply.generation != controller.generation
+                || !controller.checking
+                || controller.suspended
+            {
+                return;
+            }
+
+            controller.checking = false;
+            window.set_history_checking(false);
+
+            match result {
+                Ok(page) => {
+                    controller.page = page.page;
+                    controller.total = page.total;
+                    controller.loaded = true;
+                    controller.rows.set_vec(
+                        page.entries
+                            .iter()
+                            .map(|entry| row_from_entry(entry, reply.generation))
+                            .collect::<Vec<_>>(),
+                    );
+                    window.set_history_load_message("".into());
+                    window.set_history_checking_detail("".into());
+                    update_pagination(window, &controller);
+                    report_reconciliation(window, page.reconciliation);
+                }
+
+                Err(error) => {
+                    controller.loaded = false;
+                    controller.rows.set_vec(Vec::new());
+                    window.set_history_load_message("Could not load history".into());
+                    window.set_history_checking_detail(
+                        "Your history is kept. Retry the search.".into(),
+                    );
+                    window.set_history_page_label("History unavailable".into());
+                    set_action_status(window, format!("Could not load history: {error:#}"), true);
+                }
+            }
+        }
+    }
+}
+
+fn report_reconciliation(window: &AppWindow, reconciliation: HistoryLocalPathReconciliation) {
+    if reconciliation.cleared != 0
+        || reconciliation.unavailable != 0
+        || reconciliation.not_regular != 0
+    {
+        set_action_status(
+            window,
+            format!(
+                "History warning: cleared {} confirmed missing local path(s); kept {} path(s) \
+                 that could not be checked and {} path(s) that are not regular files.",
+                reconciliation.cleared, reconciliation.unavailable, reconciliation.not_regular
+            ),
+            reconciliation.unavailable != 0 || reconciliation.not_regular != 0,
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn wait_until_idle_for_test(
+    window: &AppWindow,
+    controller: &RefCell<HistoryController>,
+) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+
+    while controller.borrow().checking {
+        let loader = Rc::clone(&controller.borrow().loader);
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+
+        assert!(
+            !remaining.is_zero(),
+            "history presentation did not complete"
+        );
+        let reply = loader
+            .borrow_mut()
+            .wait_for_reply(remaining)
+            .expect("history worker must complete the test request");
+
+        apply_reply(window, controller, reply);
+    }
+}
+
+#[cfg(test)]
 fn notify_reconciled_local_deletions(
     original_local_paths: &[(i64, PathBuf)],
     entries: &[HistoryEntry],
@@ -508,12 +929,20 @@ fn next_sort(current: HistorySort, column: HistorySortColumn) -> HistorySort {
 
 fn update_pagination(window: &AppWindow, controller: &HistoryController) {
     let pages = page_count(controller.total);
+    let unfiltered =
+        controller.search.query.trim().is_empty() && controller.search.filter == HistoryFilter::All;
+    let noun = match (unfiltered, controller.total == 1) {
+        (true, true) => "item",
+        (true, false) => "items",
+        (false, true) => "match",
+        (false, false) => "matches",
+    };
 
     window.set_history_page_label(
         format!(
-            "Page {} of {pages}  -  {} items",
-            controller.page + 1,
-            controller.total
+            "{} {noun} · Page {} of {pages}",
+            controller.total,
+            controller.page + 1
         )
         .into(),
     );
@@ -657,7 +1086,7 @@ fn row_from_entry(entry: &HistoryEntry, generation: u64) -> HistoryRow {
         size: format_size(entry.size_bytes).into(),
         expires: if entry.expires_at.is_empty() {
             if entry.link.is_empty() {
-                "Local only".into()
+                "—".into()
             } else {
                 "Retention set by host".into()
             }
@@ -725,16 +1154,6 @@ fn set_action_result(window: &AppWindow, result: Result<String>) {
 pub(crate) fn set_action_status(window: &AppWindow, detail: impl Into<SharedString>, failed: bool) {
     window.set_history_action_detail(detail.into());
     window.set_history_action_failed(failed);
-}
-
-fn confirm(title: &str, description: &str) -> bool {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title(title)
-        .set_description(description)
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
-        == rfd::MessageDialogResult::Yes
 }
 
 #[cfg(windows)]
@@ -849,7 +1268,7 @@ mod tests {
             row_from_entry(&uploaded, 0).expires,
             "Retention set by host"
         );
-        assert_eq!(row_from_entry(&local, 0).expires, "Local only");
+        assert_eq!(row_from_entry(&local, 0).expires, "—");
     }
 
     #[test]
@@ -999,4 +1418,8 @@ mod tests {
 }
 
 #[cfg(test)]
+mod confirmation_tests;
+#[cfg(test)]
 mod presentation_tests;
+#[cfg(test)]
+mod worker_tests;

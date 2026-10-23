@@ -1,62 +1,62 @@
 import { Icons, Theme } from "../theme.slint";
-import { AppScrollView, Badge, FlatButton, IconBox, InlineNotice, PageHeading, PageSubtitle, SectionCard, SectionHeading } from "../components.slint";
+import { AppScrollView, Badge, FlatButton, IconBox, InlineNotice, PageHeading, SectionCard, SectionHeading, TooltipContent } from "../components.slint";
 
-component QuickAction inherits Rectangle {
+component CaptureAction inherits Rectangle {
     in property <string> title;
-    in property <string> subtitle;
+    in property <string> shortcut;
     in property <image> icon-source;
     in property <bool> enabled: true;
-    in property <bool> destructive: false;
-    in property <bool> active: false;
+    in property <bool> primary: false;
+    in property <bool> compact: false;
     callback clicked;
-    property <bool> hovered: action-touch.has-hover;
 
-    height: 82px;
+    height: root.primary ? 48px : 40px;
+    min-width: 0px;
     horizontal-stretch: 1;
     vertical-stretch: 0;
-    border-radius: 9px;
-    border-width: 1px;
-    border-color: action-focus.has-focus || root.active || (root.hovered && root.enabled) ? (root.destructive ? Theme.accent : Theme.primary) : Theme.border;
-    background: root.hovered && root.enabled ? Theme.surface-hover : Theme.surface;
+    border-radius: Theme.card-radius;
+    border-width: action-focus.has-focus ? 2px : 1px;
+    border-color: action-focus.has-focus ? Theme.focus : (root.primary && root.enabled ? Theme.primary : Theme.border);
+    background: root.primary && root.enabled ? (action-touch.has-hover ? Theme.primary-bright : Theme.primary) : (action-touch.has-hover && root.enabled ? Theme.surface-hover : Theme.surface);
     forward-focus: action-focus;
     accessible-role: button;
-    accessible-label: root.title + (root.subtitle != "" ? ", " + root.subtitle : "");
+    accessible-label: root.title;
+    accessible-description: root.shortcut;
     accessible-enabled: root.enabled;
-    accessible-action-default => { if (root.enabled) { root.clicked(); } }
+    accessible-action-default => { if root.enabled { root.clicked(); } }
 
-    VerticalLayout {
-        padding-left: 10px;
-        padding-right: 10px;
-        padding-top: 11px;
-        padding-bottom: 10px;
-        spacing: 7px;
+    HorizontalLayout {
+        padding-left: root.primary ? 18px : 12px;
+        padding-right: 12px;
+        spacing: root.primary ? 12px : 8px;
+        cross-axis-alignment: center;
 
-        HorizontalLayout {
-            spacing: 5px;
+        IconBox {
+            icon-source: root.icon-source;
+            tint: !root.enabled ? Theme.text-muted : (root.primary ? Theme.primary-text : Theme.text-soft);
+            icon-size: root.primary ? 25px : 18px;
+            box-width: root.primary ? 28px : 20px;
+        }
+        VerticalLayout {
+            spacing: 3px;
+            alignment: center;
+            horizontal-stretch: 1;
 
-            IconBox {
-                icon-source: root.icon-source;
-                tint: !root.enabled ? Theme.text-muted : (root.destructive ? Theme.accent : Theme.primary-bright);
-                icon-size: 20px;
-                box-width: 21px;
-            }
             Text {
-                horizontal-stretch: 1;
                 text: root.title;
-                color: root.enabled ? Theme.text : Theme.text-muted;
-                font-size: root.width < 140px ? 13px : 14px;
+                color: !root.enabled ? Theme.text-muted : (root.primary ? Theme.primary-text : Theme.text);
+                font-size: root.primary ? 17px : 13px;
                 font-weight: 600;
-                vertical-alignment: center;
+                wrap: root.compact ? word-wrap : no-wrap;
+                height: self.preferred-height;
                 overflow: elide;
             }
-        }
-        Text {
-            text: root.subtitle;
-            color: Theme.text-muted;
-            font-size: 11.5px;
-            height: self.preferred-height;
-            wrap: word-wrap;
-            overflow: elide;
+            if root.shortcut != "" && !root.compact: Text {
+                text: root.shortcut;
+                color: root.primary && root.enabled ? Theme.primary-text : Theme.text-muted;
+                font-size: 11px;
+                overflow: elide;
+            }
         }
     }
 
@@ -64,9 +64,9 @@ component QuickAction inherits Rectangle {
         width: root.width;
         height: root.height;
         focus-on-click: false;
-        enabled: root.enabled;
-
+        focus-on-tab-navigation: root.enabled;
         key-pressed(event) => {
+            if !root.enabled { return reject; }
             if event.text == Key.Space || event.text == Key.Return {
                 root.clicked();
                 return accept;
@@ -74,54 +74,61 @@ component QuickAction inherits Rectangle {
             return reject;
         }
     }
-
     action-touch := TouchArea {
         enabled: root.enabled;
         mouse-cursor: root.enabled ? pointer : default;
-        clicked => {
-            action-focus.focus();
-            root.clicked();
-        }
+        clicked => { action-focus.focus(); root.clicked(); }
     }
+
+    if root.shortcut != "": Tooltip { TooltipContent { text: root.shortcut; } }
 }
 
-component ResultRow inherits VerticalLayout {
+component ArtifactValue inherits VerticalLayout {
     in property <string> label;
     in property <string> value;
     in property <bool> link: false;
-    in property <bool> wrap-value: false;
 
+    spacing: 5px;
     vertical-stretch: 0;
-    spacing: 6px;
-
-    HorizontalLayout {
-        spacing: 10px;
-
-        Text {
-            width: 106px;
-            text: root.label;
-            color: Theme.text-muted;
-            font-size: 12.5px;
-            vertical-alignment: center;
-        }
-        Text {
-            horizontal-stretch: 1;
-            text: root.value;
-            color: root.link ? Theme.primary-bright : Theme.text-soft;
-            font-size: 12.5px;
-            vertical-alignment: center;
-            height: self.preferred-height;
-            wrap: root.wrap-value ? word-wrap : no-wrap;
-            overflow: root.wrap-value ? clip : elide;
-
-            Tooltip { text: @markdown("\{root.value}"); }
-        }
+    Text { text: root.label; color: Theme.text-muted; font-size: 11px; font-weight: 600; }
+    Text {
+        text: root.value;
+        color: root.link ? Theme.primary-bright : Theme.text-soft;
+        font-size: 12px;
+        overflow: elide;
+        Tooltip { TooltipContent { text: root.value; } }
     }
-    HorizontalLayout {
-        spacing: 8px;
-        alignment: start;
+}
 
-        @children
+component ArtifactPreview inherits Rectangle {
+    in property <image> preview;
+    in property <int> state;
+
+    height: root.state == 2 ? 200px : 80px;
+    vertical-stretch: 0;
+    border-radius: 6px;
+    background: Theme.bg;
+    border-width: 1px;
+    border-color: Theme.border;
+    if root.state == 2: Image {
+        x: 8px; y: 8px;
+        width: parent.width - 16px;
+        height: parent.height - 16px;
+        source: root.preview;
+        image-fit: contain;
+        accessible-description: "Preview of the saved local image";
+    }
+    if root.state != 2: VerticalLayout {
+        alignment: center;
+        padding: 12px;
+        spacing: 6px;
+        Text {
+            text: root.state == 1 ? "Loading preview…" : (root.state == 3 ? "No preview for this format" : "Preview unavailable");
+            color: Theme.text-muted;
+            font-size: 12px;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
     }
 }
 
@@ -134,6 +141,8 @@ export component CaptureView inherits Rectangle {
     in property <bool> recording;
     in property <bool> configured;
     in property <bool> auto-upload;
+    in property <bool> save-captures: true;
+    in property <bool> require-tor;
     in property <bool> settings-dirty;
     in property <string> uploader-name;
     in property <bool> capture-enabled;
@@ -147,6 +156,15 @@ export component CaptureView inherits Rectangle {
     in property <string> last-local-path;
     in property <string> last-delete-url;
     in property <bool> last-delete-saved;
+    in property <image> artifact-preview;
+    in property <int> artifact-preview-state;
+    in property <string> artifact-name;
+    in property <string> artifact-description;
+    in property <bool> artifact-is-previous;
+    in property <string> artifact-status-text;
+    in property <string> artifact-status-detail;
+    in property <string> artifact-action-detail;
+    in property <bool> artifact-action-error;
     in property <bool> update-available;
     in property <string> update-version;
 
@@ -162,6 +180,7 @@ export component CaptureView inherits Rectangle {
     callback open-local();
     callback reveal-local();
     callback copy-file();
+    callback upload-last();
     callback copy-delete();
     callback open-delete();
     callback open-update();
@@ -170,371 +189,401 @@ export component CaptureView inherits Rectangle {
     callback show-capture-settings();
     callback show-general-settings();
 
-    property <bool> show-activity: root.busy || root.uploading || root.recording || root.last-link != ""
-            || root.last-local-path != "" || root.last-delete-url != "" || root.status-text != "Ready";
-    property <bool> status-is-error: root.status-text == "Upload failed"
-            || root.status-text == "Upload cancelled"
+    property <bool> has-artifact: root.last-link != "" || root.last-local-path != "";
+    property <bool> active-job: root.busy || root.uploading || root.recording;
+    property <bool> public-capture: root.auto-upload && root.configured;
+    property <bool> capture-ready: root.capture-enabled && (!root.auto-upload || root.configured);
+    property <string> outcome-status: root.has-artifact ? (root.artifact-status-text != "" ? root.artifact-status-text : "Saved result") : root.status-text;
+    property <string> outcome-detail: root.has-artifact ? root.artifact-status-detail : root.status-detail;
+    property <bool> status-is-cancelled: root.outcome-status == "Upload cancelled"
+            || root.outcome-status == "Saved locally, upload cancelled";
+    property <bool> status-is-error: root.outcome-status == "Upload failed"
+            || root.outcome-status == "Upload timed out"
+            || root.outcome-status == "Saved locally, upload failed"
+            || root.outcome-status == "Saved locally, upload timed out"
+            || root.outcome-status == "Capture failed"
+            || root.outcome-status == "Save failed"
+            || root.outcome-status == "Settings invalid"
+            || root.outcome-status == "History action failed"
+            || root.outcome-status == "Setup required"
+            || root.outcome-status == "Settings not saved";
+    property <bool> current-attempt-ended: root.status-text == "Upload cancelled"
+            || root.status-text == "Upload failed"
             || root.status-text == "Upload timed out"
-            || root.status-text == "Saved locally, upload failed"
-            || root.status-text == "Saved locally, upload cancelled"
-            || root.status-text == "Saved locally, upload timed out"
             || root.status-text == "Capture failed"
             || root.status-text == "Save failed"
-            || root.status-text == "Settings invalid"
-            || root.status-text == "History action failed"
-            || root.status-text == "Setup required"
-            || root.status-text == "Settings not saved";
-    property <bool> narrow: root.width < 680px;
+            || root.status-text == "Settings invalid";
+    property <bool> narrow: root.width < 600px;
 
-    content := AppScrollView {
-        VerticalLayout {
-            spacing: 8px;
+    VerticalLayout {
+        spacing: 12px;
 
-            HorizontalLayout {
-                spacing: 12px;
-                cross-axis-alignment: center;
-
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 2px;
-
-                    PageHeading { text: "Capture & upload"; }
-                    if !root.narrow: PageSubtitle { text: "Capture a region, record your screen, or upload a file."; }
-                }
-                if !root.narrow: Badge {
-                    interactive: true;
-                    text: root.auto-upload ? (root.configured ? "Auto-upload → " + root.uploader-name : "Uploader not ready") : "Auto-upload off";
-                    tone: root.auto-upload && root.configured ? 1 : 0;
-                    clicked => {
-                        if root.auto-upload { root.show-settings(); }
-                        else { root.show-capture-settings(); }
-                    }
-                }
-            }
-
-            if root.narrow: HorizontalLayout {
-                alignment: start;
-
-                Badge {
-                    interactive: true;
-                    text: root.auto-upload ? (root.configured ? "Auto-upload → " + root.uploader-name : "Uploader not ready") : "Auto-upload off";
-                    tone: root.auto-upload && root.configured ? 1 : 0;
-                    clicked => {
-                        if root.auto-upload { root.show-settings(); }
-                        else { root.show-capture-settings(); }
-                    }
-                }
-            }
-        }
-
-        if root.settings-dirty: InlineNotice {
-            text: "Unsaved settings";
-            detail: "Save or discard your changes before starting a capture or upload.";
-            action-text: "Review settings";
-            action => { root.review-settings(); }
-        }
-
-        if !root.configured: InlineNotice {
-            text: "No upload destination yet";
-            detail: "Captures are saved on this PC. Choose a provider to upload and get a public link.";
-            action-text: "Choose provider";
-            action => { root.show-settings(); }
-        }
-
-        if root.update-available: InlineNotice {
-            text: "ShareR " + root.update-version + " is available";
-            detail: "A newer release can be installed from the project page.";
-            action-text: "View release";
-            kind: 1;
-            action => { root.open-update(); }
-        }
-
-        if !root.uploading: SectionHeading { text: "Quick actions"; }
-
-        if !root.narrow && !root.uploading: HorizontalLayout {
-            spacing: 8px;
-
-            QuickAction {
-                width: (content.content-width - 32px) / 5;
-                title: "Region";
-                subtitle: root.region-hotkey;
-                icon-source: Icons.crop;
-                enabled: !root.busy && !root.settings-dirty && root.capture-enabled;
-                clicked => { root.capture-region(); }
-            }
-            QuickAction {
-                width: (content.content-width - 32px) / 5;
-                title: root.recording ? "Stop" : "Record";
-                subtitle: root.recording ? (root.auto-upload && root.configured ? "Finish and upload" : "Finish and save") : root.recording-hotkey;
-                icon-source: Icons.recording;
-                destructive: root.recording;
-                enabled: (!root.busy || root.recording) && (root.recording || !root.settings-dirty) && root.capture-enabled;
-                clicked => { root.record-region(); }
-            }
-            QuickAction {
-                width: (content.content-width - 32px) / 5;
-                title: "Screen";
-                subtitle: root.screen-hotkey;
-                icon-source: Icons.screen;
-                enabled: !root.busy && !root.settings-dirty && root.capture-enabled;
-                clicked => { root.capture-screen(); }
-            }
-            QuickAction {
-                width: (content.content-width - 32px) / 5;
-                title: "Clipboard";
-                subtitle: root.clipboard-hotkey;
-                icon-source: Icons.clipboard;
-                enabled: !root.busy && !root.settings-dirty && root.configured;
-                clicked => { root.upload-clipboard(); }
-            }
-            QuickAction {
-                width: (content.content-width - 32px) / 5;
-                title: "File";
-                subtitle: "Upload a file";
-                icon-source: Icons.file;
-                enabled: !root.busy && !root.settings-dirty && root.configured;
-                clicked => { root.choose-file(); }
-            }
-        }
-
-        if root.narrow && !root.uploading: VerticalLayout {
-            spacing: 8px;
-
-            HorizontalLayout {
-                spacing: 8px;
-
-                QuickAction {
-                    width: (content.content-width - 16px) / 3;
-                    title: "Region";
-                    subtitle: root.region-hotkey;
-                    icon-source: Icons.crop;
-                    enabled: !root.busy && !root.settings-dirty && root.capture-enabled;
-                    clicked => { root.capture-region(); }
-                }
-                QuickAction {
-                    width: (content.content-width - 16px) / 3;
-                    title: root.recording ? "Stop" : "Record";
-                    subtitle: root.recording ? (root.auto-upload && root.configured ? "Finish and upload" : "Finish and save") : root.recording-hotkey;
-                    icon-source: Icons.recording;
-                    destructive: root.recording;
-                    enabled: (!root.busy || root.recording) && (root.recording || !root.settings-dirty) && root.capture-enabled;
-                    clicked => { root.record-region(); }
-                }
-                QuickAction {
-                    width: (content.content-width - 16px) / 3;
-                    title: "Screen";
-                    subtitle: root.screen-hotkey;
-                    icon-source: Icons.screen;
-                    enabled: !root.busy && !root.settings-dirty && root.capture-enabled;
-                    clicked => { root.capture-screen(); }
-                }
-            }
-            HorizontalLayout {
-                spacing: 8px;
-
-                QuickAction {
-                    width: (content.content-width - 16px) / 3;
-                    title: "Clipboard";
-                    subtitle: root.clipboard-hotkey;
-                    icon-source: Icons.clipboard;
-                    enabled: !root.busy && !root.settings-dirty && root.configured;
-                    clicked => { root.upload-clipboard(); }
-                }
-                QuickAction {
-                    width: (content.content-width - 16px) / 3;
-                    title: "File";
-                    subtitle: "Upload a file";
-                    icon-source: Icons.file;
-                    enabled: !root.busy && !root.settings-dirty && root.configured;
-                    clicked => { root.choose-file(); }
-                }
-                Rectangle { width: (content.content-width - 16px) / 3; background: transparent; }
-            }
-        }
-
-        if root.show-activity: SectionHeading { text: root.busy || root.recording ? "Activity" : "Last result"; }
-
-        if root.show-activity: SectionCard {
-            border-color: root.status-is-error ? Theme.danger : Theme.border;
-
+        // Job controls stay outside the scroller: Stop and Cancel never disappear
+        // when an artifact, long path or notice extends below a small window.
+        if root.active-job: SectionCard {
             VerticalLayout {
-                padding: 16px;
-                spacing: 10px;
-
+                padding: 12px;
+                spacing: 8px;
                 HorizontalLayout {
-                    spacing: 10px;
-
-                    Rectangle {
-                        width: 3px;
-                        border-radius: 2px;
-                        background: root.status-is-error ? Theme.danger : (root.busy || root.uploading ? Theme.accent : Theme.success);
-                    }
-                    VerticalLayout {
+                    spacing: 12px;
+                    cross-axis-alignment: center;
+                    Text {
                         horizontal-stretch: 1;
-                        spacing: 2px;
-
-                        Text {
-                            text: root.status-text;
-                            color: Theme.text;
-                            font-size: 15px;
-                            font-weight: 600;
-                            wrap: word-wrap;
-                        }
-                        Text {
-                            text: root.status-detail;
-                            color: Theme.text-soft;
-                            font-size: 12.5px;
-                            height: self.preferred-height;
-                            wrap: word-wrap;
-                        }
+                        text: root.recording ? "Recording your region" : (root.uploading ? "Uploading to " + root.uploader-name : root.status-text);
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: Theme.text;
+                        overflow: elide;
+                    }
+                    if root.recording: FlatButton {
+                        text: "Stop recording";
+                        danger: true;
+                        min-width: 130px;
+                        clicked => { root.record-region(); }
+                    }
+                    if root.uploading: FlatButton {
+                        text: "Cancel upload";
+                        min-width: 120px;
+                        clicked => { root.cancel-upload(); }
                     }
                 }
-
                 if root.uploading: HorizontalLayout {
                     spacing: 10px;
                     cross-axis-alignment: center;
-
                     Rectangle {
                         horizontal-stretch: 1;
-                        height: 5px;
-                        border-radius: 3px;
+                        height: 4px;
+                        border-radius: 2px;
                         background: Theme.surface-raised;
-
                         Rectangle {
-                            width: parent.width * root.upload-progress;
+                            x: 0px;
+                            y: 0px;
+                            width: parent.width * max(0, min(1, root.upload-progress));
                             height: parent.height;
-                            border-radius: 3px;
+                            border-radius: 2px;
                             background: Theme.primary;
                             animate width { duration: 90ms; }
                         }
                     }
-                    Text {
-                        width: 38px;
-                        text: round(root.upload-progress * 100) + "%";
-                        color: Theme.text-soft;
-                        font-size: 11.5px;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                    FlatButton {
-                        text: "Cancel";
-                        min-width: 76px;
-                        clicked => { root.cancel-upload(); }
-                    }
-                }
-
-                if (root.busy || root.uploading || root.recording) && (root.last-link != "" || root.last-local-path != "" || root.last-delete-url != ""): Text {
-                    text: "Previous result";
-                    color: Theme.text-muted;
-                    font-size: 12.5px;
-                    font-weight: 600;
-                }
-
-                if root.last-link != "": ResultRow {
-                    label: "Public link";
-                    value: root.last-link;
-                    link: true;
-
-                    FlatButton {
-                        text: "Copy link";
-                        description: "Copy the public link to the uploaded file.";
-                        icon-source: Icons.copy;
-                        has-icon: true;
-                        min-width: 110px;
-                        clicked => { root.copy-link(); }
-                    }
-                    FlatButton {
-                        text: "Open link";
-                        description: "Open the uploaded file's public link in your browser.";
-                        icon-source: Icons.open;
-                        has-icon: true;
-                        min-width: 110px;
-                        clicked => { root.open-link(); }
-                    }
-                }
-
-                if root.last-local-path != "": ResultRow {
-                    label: "Local file";
-                    value: root.last-local-path;
-
-                    FlatButton {
-                        text: "Open file";
-                        description: "Open the saved file on this computer.";
-                        min-width: 94px;
-                        clicked => { root.open-local(); }
-                    }
-                    FlatButton {
-                        text: "Show in folder";
-                        description: "Locate the saved file in your file manager.";
-                        min-width: 126px;
-                        clicked => { root.reveal-local(); }
-                    }
-                    FlatButton {
-                        text: "Copy file";
-                        description: "Copy the local file, not its public link, to the clipboard.";
-                        min-width: 92px;
-                        clicked => { root.copy-file(); }
-                    }
-                }
-
-                if root.last-delete-url != "": ResultRow {
-                    label: "Remote deletion";
-                    value: root.last-delete-saved ? "Deletion link saved in History" : "Deletion link is not in History; copy it now";
-                    wrap-value: true;
-
-                    FlatButton {
-                        text: "Copy deletion link";
-                        description: "Copy the private deletion link. Anyone with this link may delete the uploaded copy.";
-                        min-width: 150px;
-                        clicked => { root.copy-delete(); }
-                    }
-                    FlatButton {
-                        text: "Open deletion page…";
-                        description: "Open the host's deletion page. This may delete the uploaded copy immediately; the local file and history entry stay.";
-                        min-width: 176px;
-                        danger: true;
-                        clicked => { root.open-delete(); }
-                    }
+                    Text { text: round(root.upload-progress * 100) + "%"; color: Theme.text-soft; font-size: 11px; width: 38px; horizontal-alignment: right; }
                 }
             }
         }
 
-        if !root.show-activity: SectionCard {
-            VerticalLayout {
-                padding: 18px;
-                spacing: 10px;
+        content := AppScrollView {
+            content-spacing: 18px;
 
-                Text {
-                    text: "Ready to capture";
-                    color: Theme.text;
-                    font-size: 15px;
-                    font-weight: 600;
-                }
-                Text {
-                    text: "Use a shortcut or the actions above to capture. Find saved files and uploaded links in History.";
-                    color: Theme.text-muted;
-                    font-size: 13px;
-                    wrap: word-wrap;
-                }
+            VerticalLayout {
+                spacing: 6px;
+                PageHeading { text: "Capture"; }
                 HorizontalLayout {
-                    spacing: 16px;
+                    spacing: 8px;
                     alignment: start;
                     cross-axis-alignment: center;
-
-                    HorizontalLayout {
-                        horizontal-stretch: 0;
-                        spacing: 6px;
-                        Text { text: root.region-hotkey; color: Theme.primary-bright; font-size: 12.5px; font-weight: 600; }
-                        Text { text: "Region"; color: Theme.text-muted; font-size: 12.5px; }
+                    Badge { text: !root.capture-ready ? "Capture needs setup" : (root.public-capture ? "Public upload" : "Local only"); tone: !root.capture-ready ? 0 : (root.public-capture ? 3 : 2); }
+                    Text {
+                        horizontal-stretch: 1;
+                        text: !root.capture-ready ? (root.auto-upload && !root.configured ? "Upload destination unavailable" : "No capture output enabled") : (root.public-capture ? root.uploader-name : "Saved on this PC");
+                        color: Theme.text-soft;
+                        font-size: 12px;
+                        overflow: elide;
                     }
-                    Rectangle { width: 1px; height: 14px; background: Theme.border; }
-                    HorizontalLayout {
-                        horizontal-stretch: 0;
-                        spacing: 6px;
-                        Text { text: root.screen-hotkey; color: Theme.primary-bright; font-size: 12.5px; font-weight: 600; }
-                        Text { text: "Full screen"; color: Theme.text-muted; font-size: 12.5px; }
+                    FlatButton {
+                        text: "Change";
+                        height: 28px;
+                        description: "Choose whether captures stay local or upload automatically.";
+                        clicked => { root.show-capture-settings(); }
                     }
                 }
+                Text {
+                    text: !root.capture-ready ? (root.auto-upload && !root.configured ? "Configure the uploader or turn off automatic upload." : "Choose a destination before capturing.") : (root.public-capture ? (root.save-captures ? "Captures are uploaded automatically. A local copy is kept." : "Captures are uploaded automatically. No local copy is kept.") : "Capture first. Upload only when you choose.");
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    height: self.preferred-height;
+                }
+                if root.require-tor: Text {
+                    text: "Uploads require the local proxy";
+                    color: Theme.text-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    height: self.preferred-height;
+                }
+            }
+
+            if root.settings-dirty: InlineNotice {
+                text: "Unsaved settings";
+                detail: "Save or discard your changes before starting another capture or upload.";
+                action-text: "Review settings";
+                action => { root.review-settings(); }
+            }
+            if !root.capture-ready: InlineNotice {
+                text: root.auto-upload && !root.configured ? "Upload destination needs attention" : "Choose where captures go";
+                detail: root.auto-upload && !root.configured ? "Choose a provider, or turn off automatic upload to save captures locally." : "Turn on local copies or configure automatic uploads to start capturing.";
+                action-text: "Capture settings";
+                action => { root.show-capture-settings(); }
+            }
+
+            if !root.active-job: VerticalLayout {
+                spacing: 8px;
+                CaptureAction {
+                    title: "Capture a region";
+                    shortcut: root.region-hotkey + "  ·  Select any area of your screen";
+                    icon-source: Icons.crop;
+                    primary: true;
+                    enabled: !root.settings-dirty && root.capture-ready;
+                    clicked => { root.capture-region(); }
+                }
+                if !root.narrow: HorizontalLayout {
+                    spacing: 8px;
+                    CaptureAction {
+                        width: (content.content-width - 24px) / 4;
+                        title: "Full screen";
+                        shortcut: root.screen-hotkey;
+                        icon-source: Icons.screen;
+                        compact: true;
+                        enabled: !root.settings-dirty && root.capture-ready;
+                        clicked => { root.capture-screen(); }
+                    }
+                    CaptureAction {
+                        width: (content.content-width - 24px) / 4;
+                        title: "Record region";
+                        shortcut: root.recording-hotkey;
+                        icon-source: Icons.recording;
+                        compact: true;
+                        enabled: !root.settings-dirty && root.capture-ready;
+                        clicked => { root.record-region(); }
+                    }
+                    CaptureAction {
+                        width: (content.content-width - 24px) / 4;
+                        title: "Upload clipboard";
+                        shortcut: root.configured ? "Upload clipboard · " + root.clipboard-hotkey : "Choose a provider first";
+                        icon-source: Icons.clipboard;
+                        compact: true;
+                        enabled: !root.settings-dirty && root.configured;
+                        clicked => { root.upload-clipboard(); }
+                    }
+                    CaptureAction {
+                        width: (content.content-width - 24px) / 4;
+                        title: "Upload file";
+                        shortcut: root.configured ? "Upload a file from this PC" : "Choose a provider first";
+                        icon-source: Icons.file;
+                        compact: true;
+                        enabled: !root.settings-dirty && root.configured;
+                        clicked => { root.choose-file(); }
+                    }
+                }
+                if root.narrow: HorizontalLayout {
+                    spacing: 8px;
+                    CaptureAction {
+                        width: (content.content-width - 8px) / 2;
+                        title: "Full screen";
+                        shortcut: root.screen-hotkey;
+                        icon-source: Icons.screen;
+                        enabled: !root.settings-dirty && root.capture-ready;
+                        clicked => { root.capture-screen(); }
+                    }
+                    CaptureAction {
+                        width: (content.content-width - 8px) / 2;
+                        title: "Record region";
+                        shortcut: root.recording-hotkey;
+                        icon-source: Icons.recording;
+                        enabled: !root.settings-dirty && root.capture-ready;
+                        clicked => { root.record-region(); }
+                    }
+                }
+                if root.narrow: HorizontalLayout {
+                    spacing: 8px;
+                    CaptureAction {
+                        width: (content.content-width - 8px) / 2;
+                        title: "Upload clipboard";
+                        shortcut: root.configured ? root.clipboard-hotkey : "Choose a provider first";
+                        icon-source: Icons.clipboard;
+                        enabled: !root.settings-dirty && root.configured;
+                        clicked => { root.upload-clipboard(); }
+                    }
+                    CaptureAction {
+                        width: (content.content-width - 8px) / 2;
+                        title: "Upload a file";
+                        shortcut: root.configured ? "Choose from this PC" : "Choose a provider first";
+                        icon-source: Icons.file;
+                        enabled: !root.settings-dirty && root.configured;
+                        clicked => { root.choose-file(); }
+                    }
+                }
+                if !root.configured: HorizontalLayout {
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+                    Text { text: "Want to share a public link?"; color: Theme.text-muted; font-size: 12px; horizontal-stretch: 1; }
+                    FlatButton { text: "Choose provider"; clicked => { root.show-settings(); } }
+                }
+            }
+
+            if root.artifact-is-previous && !root.active-job && root.current-attempt-ended: SectionCard {
+                border-color: root.status-text == "Upload cancelled" ? Theme.border : Theme.danger;
+                VerticalLayout {
+                    padding: 12px;
+                    spacing: 4px;
+                    Text {
+                        text: root.status-text;
+                        color: Theme.text;
+                        font-size: 13px;
+                        font-weight: 600;
+                    }
+                    if root.status-detail != "": Text {
+                        text: root.status-detail;
+                        color: Theme.text-soft;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                        height: self.preferred-height;
+                    }
+                }
+            }
+
+            if root.has-artifact || root.status-is-error || root.status-is-cancelled: VerticalLayout {
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 8px;
+                    cross-axis-alignment: center;
+                    SectionHeading { text: root.artifact-is-previous || root.active-job ? "Previous result" : "Last result"; horizontal-stretch: 1; }
+                    if root.has-artifact: Badge { text: root.last-link != "" ? "Public link ready" : "Local file"; tone: root.last-link != "" ? 1 : 2; }
+                }
+                SectionCard {
+                    border-color: root.status-is-error ? Theme.danger : Theme.border;
+                    HorizontalLayout {
+                        padding: 16px;
+                        spacing: 16px;
+                        cross-axis-alignment: start;
+
+                        if !root.narrow && root.last-local-path != "": ArtifactPreview {
+                            width: (content.content-width - 48px) * 0.42;
+                            preview: root.artifact-preview;
+                            state: root.artifact-preview-state;
+                        }
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            spacing: 14px;
+                            VerticalLayout {
+                                spacing: 4px;
+                                Text {
+                                    text: root.artifact-name != "" ? root.artifact-name : root.outcome-status;
+                                    color: Theme.text;
+                                    font-size: 15px;
+                                    font-weight: 600;
+                                    overflow: elide;
+                                    Tooltip { TooltipContent { text: root.artifact-name; } }
+                                }
+                                if root.artifact-description != "": Text {
+                                    text: root.artifact-description;
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                    height: self.preferred-height;
+                                }
+                                if root.outcome-detail != "": Text {
+                                    text: root.outcome-detail;
+                                    color: root.status-is-error ? Theme.danger : Theme.text-soft;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                    height: self.preferred-height;
+                                }
+                            }
+                            if root.last-link != "": VerticalLayout {
+                                spacing: 8px;
+                                ArtifactValue { label: "PUBLIC LINK"; value: root.last-link; link: true; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    FlatButton { text: "Copy link"; enabled: !root.active-job; primary: true; icon-source: Icons.copy; has-icon: true; clicked => { root.copy-link(); } }
+                                    FlatButton { text: "Open link"; enabled: !root.active-job; clicked => { root.open-link(); } }
+                                }
+                            }
+                            if root.last-local-path != "": VerticalLayout {
+                                spacing: 8px;
+                                ArtifactValue { label: "LOCAL FILE"; value: root.last-local-path; }
+                                local-actions := Rectangle {
+                                    // Wrap based on the details column and intrinsic button widths.
+                                    property <bool> single-row: self.width >= local-copy.preferred-width + local-open.preferred-width + local-reveal.preferred-width + 16px;
+                                    height: self.single-row ? Theme.control-height : Theme.control-height * 2 + 8px;
+                                    vertical-stretch: 0;
+                                    local-copy := FlatButton {
+                                        x: 0px;
+                                        y: 0px;
+                                        width: self.preferred-width;
+                                        text: "Copy file"; enabled: !root.active-job; primary: root.last-link == ""; icon-source: Icons.copy; has-icon: true; clicked => { root.copy-file(); }
+                                    }
+                                    local-open := FlatButton {
+                                        x: local-copy.width + 8px;
+                                        y: 0px;
+                                        width: self.preferred-width;
+                                        text: "Open file"; enabled: !root.active-job; clicked => { root.open-local(); }
+                                    }
+                                    local-reveal := FlatButton {
+                                        x: local-actions.single-row ? local-open.x + local-open.width + 8px : 0px;
+                                        y: local-actions.single-row ? 0px : Theme.control-height + 8px;
+                                        width: self.preferred-width;
+                                        text: "Show in folder"; enabled: !root.active-job; clicked => { root.reveal-local(); }
+                                    }
+                                }
+                                if root.last-link == "": HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    FlatButton {
+                                        text: root.configured ? (root.status-is-error || root.status-is-cancelled ? "Retry upload" : "Upload saved file") : "Choose upload provider";
+                                        description: root.configured ? "Upload this saved file to " + root.uploader-name + " and create a public link." : "Choose a provider before uploading this saved file.";
+                                        enabled: !root.active-job && !root.settings-dirty;
+                                        clicked => { if root.configured { root.upload-last(); } else { root.show-settings(); } }
+                                    }
+                                    if root.configured: Text { text: "to " + root.uploader-name; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; overflow: elide; }
+                                }
+                            }
+                            if root.artifact-action-detail != "": Text {
+                                text: root.artifact-action-detail;
+                                color: root.artifact-action-error ? Theme.danger : Theme.success;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                                height: self.preferred-height;
+                            }
+                            if root.narrow && root.last-local-path != "": ArtifactPreview {
+                                height: root.artifact-preview-state == 2 ? 152px : 80px;
+                                preview: root.artifact-preview;
+                                state: root.artifact-preview-state;
+                            }
+                            if root.last-delete-url != "": VerticalLayout {
+                                spacing: 8px;
+                                Text {
+                                    text: root.last-delete-saved ? "A private deletion link is saved in History." : "Copy the private deletion link now; it could not be saved in History.";
+                                    color: root.last-delete-saved ? Theme.text-muted : Theme.accent;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                    height: self.preferred-height;
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    alignment: start;
+                                    FlatButton { text: "Copy deletion link"; enabled: !root.active-job; clicked => { root.copy-delete(); } }
+                                    FlatButton { text: "Delete online…"; enabled: !root.active-job; danger: true; clicked => { root.open-delete(); } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !root.has-artifact && !root.status-is-error && !root.status-is-cancelled && !root.active-job: SectionCard {
+                VerticalLayout {
+                    padding: 18px;
+                    spacing: 6px;
+                    Text { text: "Your capture will appear here"; color: Theme.text-soft; font-size: 14px; font-weight: 600; }
+                    Text { text: "Preview it, copy the file, or share a link. Earlier captures stay in History."; color: Theme.text-muted; font-size: 12px; wrap: word-wrap; height: self.preferred-height; }
+                }
+            }
+            if root.update-available: InlineNotice {
+                text: "ShareR " + root.update-version + " is available";
+                detail: "Get the latest version from the project page.";
+                action-text: "View release";
+                kind: 1;
+                action => { root.open-update(); }
             }
         }
     }

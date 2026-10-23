@@ -1,6 +1,7 @@
 import { Theme } from "../theme.slint";
 import { AppScrollView, CompactField, FlatButton, IconBox, SelectableButton, ToggleRow } from "../components.slint";
 import { ProviderPicker } from "../provider-picker.slint";
+import { LitterboxRetentionPicker } from "../retention-picker.slint";
 
 export component OnboardingView inherits Rectangle {
     in-out property <int> step: 0;
@@ -15,6 +16,7 @@ export component OnboardingView inherits Rectangle {
     in-out property <string> wizard-header-name;
     in-out property <string> wizard-header-value;
     in-out property <int> wizard-lifetime-seconds: 86400;
+    in-out property <int> wizard-litterbox-retention: 3;
     in-out property <string> error;
     in property <bool> replay: false;
     in property <bool> resetting: false;
@@ -31,284 +33,307 @@ export component OnboardingView inherits Rectangle {
     property <bool> compact: root.height < 560px;
     property <bool> local-only: root.wizard-provider == -1;
     property <string> destination-name: root.wizard-provider == 1 ? "Uguu" : root.wizard-provider == 2 ? "Catbox" : root.wizard-provider == 3 ? "Litterbox" : root.wizard-provider == 4 ? "Imgur" : root.wizard-provider == 5 ? "Pixeldrain" : root.wizard-provider == 6 ? "s-ul" : root.wizard-provider == 0 ? "Custom server" : "Local only";
+    property <string> destination-summary: root.destination-name + (root.wizard-provider == 3 ? " · " + (root.wizard-litterbox-retention == 0 ? "1 hour" : root.wizard-litterbox-retention == 1 ? "12 hours" : root.wizard-litterbox-retention == 2 ? "24 hours" : "72 hours") + " retention" : "");
     property <string> local-copies: (root.save-captures || root.local-only || !root.wizard-auto-upload) ? "On — " + (root.capture-directory == "" ? "Pictures/ShareR" : root.capture-directory) : "Off";
 
     background: #06090bf2;
+    accessible-role: groupbox;
+    accessible-label: root.resetting ? "Reset ShareR settings" : "Set up ShareR";
+    accessible-description: "Step " + (root.step + 1) + " of 2";
 
     TouchArea { clicked => { } }
 
-    Rectangle {
-        width: min(parent.width - 48px, 680px);
-        height: min(parent.height - 40px, 620px);
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        border-radius: 14px;
-        border-width: 1px;
-        border-color: Theme.border-bright;
-        background: Theme.surface;
-
-        VerticalLayout {
-            padding: root.compact ? 16px : 24px;
-            spacing: root.compact ? 8px : 16px;
-
-            HorizontalLayout {
-                spacing: 12px;
-                cross-axis-alignment: center;
-
-                IconBox {
-                    icon-source: @image-url("../../assets/sharer.png");
-                    tint: transparent;
-                    icon-size: 34px;
-                    box-width: 36px;
-                }
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    spacing: 1px;
-
-                    Text { text: "ShareR"; color: Theme.text; font-size: 18px; font-weight: 600; }
-                    Text { text: "Capture, share, keep a history"; color: Theme.text-muted; font-size: 12.5px; }
-                }
-                Text { text: "Step " + (root.step + 1) + " of 2"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
+    keyboard-focus := FocusScope {
+        width: parent.width;
+        height: parent.height;
+        focus-on-tab-navigation: false;
+        focus-on-click: false;
+        key-pressed(event) => {
+            if event.text == Key.Escape && root.replay {
+                root.skip();
+                return accept;
             }
+            return reject;
+        }
 
-            Rectangle { height: 1px; background: Theme.border; }
+        Rectangle {
+            width: min(parent.width - 48px, 680px);
+            height: min(parent.height - 40px, 620px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            border-radius: 14px;
+            border-width: 1px;
+            border-color: Theme.border-bright;
+            background: Theme.surface;
 
-            if root.step == 0: choice-scroll := AppScrollView {
-                Timer {
-                    interval: 16ms;
-                    running: true;
-                    triggered => {
-                        self.running = false;
-                        destinations.focus-first();
-                        choice-scroll.viewport-y = 0px;
-                    }
-                }
-                vertical-stretch: 1;
-                min-height: 0px;
+            VerticalLayout {
+                padding: root.compact ? 16px : 24px;
+                spacing: root.compact ? 8px : 16px;
 
-                VerticalLayout {
+                HorizontalLayout {
                     spacing: 12px;
+                    cross-axis-alignment: center;
 
-                    Text { text: "Where should uploads go?"; color: Theme.text; font-size: root.compact ? 18px : 21px; font-weight: 600; }
-                    Text { text: root.resetting ? "Review reset defaults. Credentials, capture folder, history and files are kept. Nothing changes until you finish." : "Pick a destination. Nothing changes until you finish."; color: Theme.text-soft; font-size: 13px; wrap: word-wrap; }
+                    IconBox {
+                        icon-source: @image-url("../../assets/sharer.png");
+                        tint: transparent;
+                        icon-size: 34px;
+                        box-width: 36px;
+                    }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        spacing: 1px;
 
-                    destinations := ProviderPicker {
-                        selected-provider <=> root.wizard-provider;
-                        provider-limits: root.provider-limits;
-                        show-local: true;
-                        chosen(index) => {
-                            root.wizard-auto-upload = index != -1;
-                            root.error = "";
+                        Text { text: "ShareR"; color: Theme.text; font-size: 18px; font-weight: 600; }
+                        Text { text: "Capture, share, keep a history"; color: Theme.text-muted; font-size: 12.5px; }
+                    }
+                    Text { text: "Step " + (root.step + 1) + " of 2"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
+                }
+
+                Rectangle { height: 1px; background: Theme.border; }
+
+                if root.step == 0: choice-scroll := AppScrollView {
+                    Timer {
+                        interval: 16ms;
+                        running: true;
+                        triggered => {
+                            self.running = false;
+                            destinations.focus-first();
+                            choice-scroll.viewport-y = 0px;
                         }
                     }
-                    if root.wizard-provider >= 4 && root.wizard-provider <= 6: VerticalLayout {
-                        spacing: 6px;
-                        Text {
-                            text: root.wizard-provider == 4 ? "Imgur client ID" : root.wizard-provider == 5 ? "Pixeldrain API key" : "s-ul API key";
-                            color: Theme.text-soft;
-                            font-size: 12.5px;
-                        }
-                        if root.wizard-provider == 4: CompactField {
-                            text <=> root.wizard-imgur-credential;
-                            placeholder-text: "Required";
-                            input-type: InputType.password;
-                            label: "Imgur client ID";
-                            edited => { root.error = ""; }
-                        }
-                        if root.wizard-provider == 5: CompactField {
-                            text <=> root.wizard-pixeldrain-credential;
-                            placeholder-text: "Required";
-                            input-type: InputType.password;
-                            label: "Pixeldrain API key";
-                            edited => { root.error = ""; }
-                        }
-                        if root.wizard-provider == 6: CompactField {
-                            text <=> root.wizard-sul-credential;
-                            placeholder-text: "Required";
-                            input-type: InputType.password;
-                            label: "s-ul API key";
-                            edited => { root.error = ""; }
-                        }
-                    }
-                    if root.wizard-provider == 0: CompactField {
-                        text <=> root.wizard-uploader-url;
-                        placeholder-text: "https://uploads.example/upload";
-                        label: "Custom upload endpoint";
-                        edited => { root.endpoint-edited(); root.error = ""; }
-                    }
-                    if root.wizard-provider == 0: VerticalLayout {
-                        spacing: 8px;
+                    vertical-stretch: 1;
+                    min-height: 0px;
 
-                        Text {
-                            text: "Advanced (optional): authentication header and expiry.";
-                            wrap: word-wrap;
-                            color: Theme.text-muted;
-                            font-size: 12px;
-                        }
-                        HorizontalLayout {
-                            spacing: 8px;
+                    VerticalLayout {
+                        spacing: 12px;
 
-                            CompactField {
-                                horizontal-stretch: 1;
-                                text <=> root.wizard-header-name;
-                                placeholder-text: "Header name";
-                                label: "Request header name";
-                                edited => { root.header-edited(); root.error = ""; }
-                            }
-                            CompactField {
-                                horizontal-stretch: 1;
-                                text <=> root.wizard-header-value;
-                                placeholder-text: "Header value";
-                                input-type: InputType.password;
-                                label: "Request header value";
-                                edited => { root.header-edited(); root.error = ""; }
+                        Text { text: "Where should uploads go?"; color: Theme.text; font-size: root.compact ? 18px : 21px; font-weight: 600; }
+                        Text { text: root.resetting ? "Review reset defaults. Credentials, capture folder, history and files are kept. Nothing changes until you finish." : "Pick a destination. Nothing changes until you finish."; color: Theme.text-soft; font-size: 13px; wrap: word-wrap; }
+
+                        destinations := ProviderPicker {
+                            selected-provider <=> root.wizard-provider;
+                            provider-limits: root.provider-limits;
+                            show-local: true;
+                            chosen(index) => {
+                            if index == -1 { root.wizard-auto-upload = false; }
+                                root.error = "";
                             }
                         }
-                        Text { text: "Delete upload after"; color: Theme.text-soft; font-size: 12.5px; }
-                        HorizontalLayout {
+                        if root.wizard-provider == 3: LitterboxRetentionPicker {
+                            selected-retention <=> root.wizard-litterbox-retention;
+                        }
+                        if root.wizard-provider >= 4 && root.wizard-provider <= 6: VerticalLayout {
                             spacing: 6px;
-                            cross-axis-alignment: center;
-                            SelectableButton { text: "No expiry"; min-width: 84px; selected: root.wizard-lifetime-seconds == 0; clicked => { root.wizard-lifetime-seconds = 0; } }
-                            SelectableButton { text: "1 hour"; selected: root.wizard-lifetime-seconds == 3600; clicked => { root.wizard-lifetime-seconds = 3600; } }
-                            SelectableButton { text: "1 day"; selected: root.wizard-lifetime-seconds == 86400; clicked => { root.wizard-lifetime-seconds = 86400; } }
-                            SelectableButton { text: "1 week"; selected: root.wizard-lifetime-seconds == 604800; clicked => { root.wizard-lifetime-seconds = 604800; } }
-                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            Text {
+                                text: root.wizard-provider == 4 ? "Imgur client ID" : root.wizard-provider == 5 ? "Pixeldrain API key" : "s-ul API key";
+                                color: Theme.text-soft;
+                                font-size: 12.5px;
+                            }
+                            if root.wizard-provider == 4: CompactField {
+                                text <=> root.wizard-imgur-credential;
+                                placeholder-text: "Required";
+                                input-type: InputType.password;
+                                label: "Imgur client ID";
+                                edited => { root.error = ""; }
+                            }
+                            if root.wizard-provider == 5: CompactField {
+                                text <=> root.wizard-pixeldrain-credential;
+                                placeholder-text: "Required";
+                                input-type: InputType.password;
+                                label: "Pixeldrain API key";
+                                edited => { root.error = ""; }
+                            }
+                            if root.wizard-provider == 6: CompactField {
+                                text <=> root.wizard-sul-credential;
+                                placeholder-text: "Required";
+                                input-type: InputType.password;
+                                label: "s-ul API key";
+                                edited => { root.error = ""; }
+                            }
                         }
-                        Text {
-                            text: (root.wizard-lifetime-seconds == 0 ? "No expiry requested." : "Current expiry: " + root.wizard-lifetime-seconds + " seconds.") + " The host may still enforce its own retention limits.";
+                        if root.wizard-provider == 0: CompactField {
+                            text <=> root.wizard-uploader-url;
+                            placeholder-text: "https://uploads.example/upload";
+                            label: "Custom upload endpoint";
+                            edited => { root.endpoint-edited(); root.error = ""; }
+                        }
+                        if root.wizard-provider == 0: VerticalLayout {
+                            spacing: 8px;
+
+                            Text {
+                                text: "Advanced (optional): authentication header and expiry.";
+                                wrap: word-wrap;
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+
+                                CompactField {
+                                    horizontal-stretch: 1;
+                                    text <=> root.wizard-header-name;
+                                    placeholder-text: "Header name";
+                                    label: "Request header name";
+                                    edited => { root.header-edited(); root.error = ""; }
+                                }
+                                CompactField {
+                                    horizontal-stretch: 1;
+                                    text <=> root.wizard-header-value;
+                                    placeholder-text: "Header value";
+                                    input-type: InputType.password;
+                                    label: "Request header value";
+                                    edited => { root.header-edited(); root.error = ""; }
+                                }
+                            }
+                            Text { text: "Delete upload after"; color: Theme.text-soft; font-size: 12.5px; }
+                            HorizontalLayout {
+                                spacing: 6px;
+                                cross-axis-alignment: center;
+                                SelectableButton { text: "No expiry"; min-width: 84px; selected: root.wizard-lifetime-seconds == 0; clicked => { root.wizard-lifetime-seconds = 0; } }
+                                SelectableButton { text: "1 hour"; selected: root.wizard-lifetime-seconds == 3600; clicked => { root.wizard-lifetime-seconds = 3600; } }
+                                SelectableButton { text: "1 day"; selected: root.wizard-lifetime-seconds == 86400; clicked => { root.wizard-lifetime-seconds = 86400; } }
+                                SelectableButton { text: "1 week"; selected: root.wizard-lifetime-seconds == 604800; clicked => { root.wizard-lifetime-seconds = 604800; } }
+                                Rectangle { horizontal-stretch: 1; background: transparent; }
+                            }
+                            Text {
+                                text: (root.wizard-lifetime-seconds == 0 ? "No expiry requested." : "Current expiry: " + root.wizard-lifetime-seconds + " seconds.") + " The host may still enforce its own retention limits.";
+                                color: Theme.text-muted;
+                                font-size: 12px;
+                                wrap: word-wrap;
+                            }
+                        }
+                        if root.wizard-provider == 0 && !root.compact: Text {
+                            text: "The endpoint receives a multipart upload and returns a public link.";
+                            color: Theme.text-muted;
+                            font-size: 12.5px;
+                            wrap: word-wrap;
+                        }
+                        if root.wizard-provider == -1 && !root.compact: Text {
+                            text: "Captures will be saved in your capture folder without uploading. The saved provider and credentials are kept.";
+                            color: Theme.text-muted;
+                            font-size: 12.5px;
+                            wrap: word-wrap;
+                        }
+
+                        if !root.local-only: Text {
+                            text: "Public links can be opened by anyone who has them. Do not upload private screenshots to a public host.";
+                            color: Theme.accent;
+                            font-size: 12.5px;
+                            wrap: word-wrap;
+                        }
+
+                    }
+                }
+
+                if root.step == 1: AppScrollView {
+                    init => { review-heading.focus(); }
+                    vertical-stretch: 1;
+                    min-height: 0px;
+
+                    VerticalLayout {
+                        spacing: root.compact ? 8px : 14px;
+
+                        review-heading := FocusScope {
+                            accessible-role: text;
+                            accessible-label: "Review your choices";
+                            height: heading-text.preferred-height;
+                            focus-on-click: false;
+                            focus-on-tab-navigation: false;
+                            heading-text := Text { text: "Review your choices"; color: Theme.text; font-size: root.compact ? 18px : 21px; font-weight: 600; }
+                        }
+                        Text { text: root.resetting ? "Finish to reset other preferences and apply these choices. Cancel keeps all saved settings." : "Finish to save these choices. You can change them later in Settings."; color: Theme.text-soft; font-size: 13px; wrap: word-wrap; }
+
+                        if root.compact: Text {
+                            text: root.destination-summary + " · Automatic upload " + (root.local-only ? "off" : (root.wizard-auto-upload ? "on" : "off")) + " · Local copies: " + root.local-copies;
                             color: Theme.text-muted;
                             font-size: 12px;
                             wrap: word-wrap;
                         }
-                    }
-                    if root.wizard-provider == 0 && !root.compact: Text {
-                        text: "The endpoint receives a multipart upload and returns a public link.";
-                        color: Theme.text-muted;
-                        font-size: 12.5px;
-                        wrap: word-wrap;
-                    }
-                    if root.wizard-provider == -1 && !root.compact: Text {
-                        text: "Captures will be saved in your capture folder without uploading. The saved provider and credentials are kept.";
-                        color: Theme.text-muted;
-                        font-size: 12.5px;
-                        wrap: word-wrap;
-                    }
 
-                    if !root.local-only: Text {
-                        text: "Public links can be opened by anyone who has them. Do not upload private screenshots to a public host.";
-                        color: Theme.accent;
-                        font-size: 12.5px;
-                        wrap: word-wrap;
-                    }
-
-                }
-            }
-
-            if root.step == 1: AppScrollView {
-                init => { review-heading.focus(); }
-                vertical-stretch: 1;
-                min-height: 0px;
-
-                VerticalLayout {
-                    spacing: root.compact ? 8px : 14px;
-
-                    review-heading := FocusScope {
-                        height: heading-text.preferred-height;
-                        focus-on-click: false;
-                        focus-on-tab-navigation: false;
-                        heading-text := Text { text: "Review your choices"; color: Theme.text; font-size: root.compact ? 18px : 21px; font-weight: 600; }
-                    }
-                    Text { text: root.resetting ? "Finish to reset other preferences and apply these choices. Cancel keeps all saved settings." : "Finish to save these choices. You can change them later in Settings."; color: Theme.text-soft; font-size: 13px; wrap: word-wrap; }
-
-                    if root.compact: Text {
-                        text: root.destination-name + " · Automatic upload " + (root.local-only ? "off" : (root.wizard-auto-upload ? "on" : "off")) + " · Local copies: " + root.local-copies;
-                        color: Theme.text-muted;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-
-                    review-upload := ToggleRow {
-                        title: "Upload new captures automatically";
-                        description: root.local-only ? "Off because captures stay on this PC." : "Captures leave this PC and get a public link as soon as they are taken.";
-                        enabled: !root.local-only;
-                        checked <=> root.wizard-auto-upload;
-                    }
-
-                    if !root.compact: Rectangle {
-                        height: summary-content.preferred-height;
-                        border-radius: 9px;
-                        border-width: 1px;
-                        border-color: Theme.border;
-                        background: Theme.surface-raised;
-
-                        summary-content := VerticalLayout {
-                            padding: 14px;
-                            spacing: 8px;
-
-                            Text { text: "Destination"; color: Theme.text-muted; font-size: 12px; }
-                            Text { text: root.destination-name; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; }
-                            Text { text: "Automatic upload"; color: Theme.text-muted; font-size: 12px; }
-                            Text { text: root.local-only ? "Off" : (root.wizard-auto-upload ? "On" : "Off"); color: Theme.text; font-size: 13px; font-weight: 600; }
-                            Text { text: "Local copies"; color: Theme.text-muted; font-size: 12px; }
-                            Text { text: root.local-copies; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; height: self.preferred-height; }
-
+                        review-upload := ToggleRow {
+                            title: "Upload new captures automatically";
+                            description: root.local-only ? "Off because captures stay on this PC." : "Captures leave this PC and get a public link as soon as they are taken.";
+                            enabled: !root.local-only;
+                            checked <=> root.wizard-auto-upload;
                         }
+
+                        if !root.compact: Rectangle {
+                            height: summary-content.preferred-height;
+                            border-radius: 9px;
+                            border-width: 1px;
+                            border-color: Theme.border;
+                            background: Theme.surface-raised;
+
+                            summary-content := VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+
+                                Text { text: "Destination"; color: Theme.text-muted; font-size: 12px; }
+                                Text { text: root.destination-summary; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; }
+                                Text { text: "Automatic upload"; color: Theme.text-muted; font-size: 12px; }
+                                Text { text: root.local-only ? "Off" : (root.wizard-auto-upload ? "On" : "Off"); color: Theme.text; font-size: 13px; font-weight: 600; }
+                                Text { text: "Local copies"; color: Theme.text-muted; font-size: 12px; }
+                                Text { text: root.local-copies; color: Theme.text; font-size: 13px; font-weight: 600; wrap: word-wrap; height: self.preferred-height; }
+
+                            }
+                        }
+
+                        review-sound := ToggleRow {
+                            title: "Play a sound after a successful upload";
+                            description: "No sound for local saves or failed uploads. Independent of copying the link.";
+                            checked <=> root.wizard-sound;
+                        }
+                        ToggleRow {
+                            title: "Start ShareR when I sign in";
+                            description: "Runs hidden in the notification area. Shortcuts work immediately.";
+                            checked <=> root.wizard-start-at-login;
+                        }
+
+                        Text {
+                            text: "You can change all of this in Settings. History stays on this computer.";
+                            color: Theme.text-muted;
+                            font-size: 12.5px;
+                            wrap: word-wrap;
+                        }
+
                     }
+                }
 
-                    review-sound := ToggleRow {
-                        title: "Play a sound after a successful upload";
-                        description: "No sound for local saves or failed uploads. Independent of copying the link.";
-                        checked <=> root.wizard-sound;
+                if root.error != "": Text {
+                    text: root.error;
+                    color: Theme.danger;
+                    font-size: 12.5px;
+                    wrap: word-wrap;
+                }
+
+                Rectangle { height: 1px; background: Theme.border; }
+
+                HorizontalLayout {
+                    spacing: 10px;
+                    cross-axis-alignment: center;
+
+                    if root.replay: FlatButton {
+                        text: "Cancel";
+                        clicked => { root.skip(); }
                     }
-                    ToggleRow {
-                        title: "Start ShareR when I sign in";
-                        description: "Runs hidden in the notification area. Shortcuts work immediately.";
-                        checked <=> root.wizard-start-at-login;
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    if root.step == 1: FlatButton {
+                        text: "Back";
+                        clicked => { root.step = 0; root.error = ""; }
                     }
-
-                    Text {
-                        text: "You can change all of this in Settings. History stays on this computer.";
-                        color: Theme.text-muted;
-                        font-size: 12.5px;
-                        wrap: word-wrap;
+                    if root.step == 0: FlatButton {
+                        text: "Continue";
+                        primary: true;
+                        min-width: 104px;
+                        clicked => { root.continue-setup(); }
                     }
-
-                }
-            }
-
-            if root.error != "": Text {
-                text: root.error;
-                color: Theme.danger;
-                font-size: 12.5px;
-                wrap: word-wrap;
-            }
-
-            Rectangle { height: 1px; background: Theme.border; }
-
-            HorizontalLayout {
-                spacing: 10px;
-                cross-axis-alignment: center;
-
-                if root.replay: FlatButton {
-                    text: "Cancel";
-                    clicked => { root.skip(); }
-                }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
-                if root.step == 1: FlatButton {
-                    text: "Back";
-                    clicked => { root.step = 0; root.error = ""; }
-                }
-                if root.step == 0: FlatButton {
-                    text: "Continue";
-                    primary: true;
-                    min-width: 104px;
-                    clicked => { root.continue-setup(); }
-                }
-                if root.step == 1: FlatButton {
-                    text: root.resetting ? "Reset and finish" : root.replay ? "Save setup" : "Start using ShareR";
-                    primary: true;
-                    min-width: 152px;
-                    clicked => { root.finish(); }
+                    if root.step == 1: FlatButton {
+                        text: root.resetting ? "Reset and finish" : root.replay ? "Save setup" : "Start using ShareR";
+                        primary: true;
+                        min-width: 152px;
+                        clicked => { root.finish(); }
+                    }
                 }
             }
         }

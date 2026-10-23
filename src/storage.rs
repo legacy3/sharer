@@ -4,7 +4,7 @@ use std::{
     cell::RefCell,
     io::{Error as IoError, Result as IoResult},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::{Context, Result};
@@ -12,15 +12,23 @@ use anyhow::{Context, Result};
 use cap_std::fs::{Permissions, PermissionsExt as _};
 use cap_std::{ambient_authority, fs::Dir};
 use directories::{ProjectDirs, UserDirs};
-use rusqlite::{Connection, OptionalExtension as _, params};
+use rusqlite::{Connection, OptionalExtension as _, params, types::Value};
 
 use crate::{
     MAX_HISTORY_PAGE_SIZE,
-    history::{HistoryEntry, HistorySort, HistorySortColumn, SortDirection},
+    history::{HistoryEntry, HistoryFilter, HistorySort, HistorySortColumn, SortDirection},
 };
 
 const DATABASE_FILE: &str = "sharer.sqlite3";
 const SQLITE_CACHE_KIB: i64 = -512;
+const HISTORY_COLUMNS: &str =
+    "id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path";
+// Search only ordinary display values. Deletion URLs are private capabilities.
+const HISTORY_SELECTION: &str = "WHERE (?1 = ''
+    OR instr(lower(original_name), lower(?1)) > 0
+    OR instr(lower(link), lower(?1)) > 0
+    OR instr(lower(local_path), lower(?1)) > 0)
+    AND (?2 = 0 OR (?2 = 1 AND link = '') OR (?2 = 2 AND link <> ''))";
 
 /// Minimal persistence interface used by configuration code.
 pub trait Storage {
@@ -42,6 +50,7 @@ pub trait Storage {
 /// Storage rooted at this application's platform configuration directory.
 pub struct PlatformStorage {
     connection: RefCell<Connection>,
+    directory: PathBuf,
 }
 
 /// Outcome of checking the local paths on one bounded history page.
@@ -96,6 +105,8 @@ impl PlatformStorage {
     /// Returns an error when the directory or `SQLite` database cannot be initialized.
     pub fn open_in(path: &Path) -> Result<Self> {
         let authority = ambient_authority();
+        let profile_directory =
+            std::path::absolute(path).context("failed to resolve the ShareR profile directory")?;
 
         Dir::create_ambient_dir_all(path, authority)
             .with_context(|| format!("failed to create {}", path.display()))?;
@@ -162,6 +173,20 @@ impl PlatformStorage {
         }
 
         backfill_history_creation_dates(&connection)?;
+        connection
+            .execute_batch(
+                "CREATE INDEX IF NOT EXISTS history_filename
+                     ON upload_history (original_name COLLATE NOCASE, id);
+                 CREATE INDEX IF NOT EXISTS history_created_at
+                     ON upload_history (created_at, id);
+                 CREATE INDEX IF NOT EXISTS history_size
+                     ON upload_history (size_bytes, id);
+                 CREATE INDEX IF NOT EXISTS history_expiration_ascending
+                     ON upload_history ((expires_at = '') ASC, expires_at ASC, id ASC);
+                 CREATE INDEX IF NOT EXISTS history_expiration_descending
+                     ON upload_history ((expires_at = '') ASC, expires_at DESC, id DESC);",
+            )
+            .context("failed to index capture history")?;
 
         #[cfg(unix)]
         directory
@@ -170,7 +195,26 @@ impl PlatformStorage {
 
         Ok(Self {
             connection: RefCell::new(connection),
+            directory: profile_directory,
         })
+    }
+
+    /// Return the resolved profile directory for an independent background connection.
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    /// Limit this connection's wait for a conflicting database lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot install the timeout.
+    pub fn set_lock_wait_timeout(&self, timeout: Duration) -> Result<()> {
+        self.connection
+            .borrow()
+            .busy_timeout(timeout)
+            .context("failed to configure the database lock timeout")
     }
 
     /// Insert one upload without retaining previous entries in memory.
@@ -302,80 +346,121 @@ impl PlatformStorage {
         limit: usize,
         sort: HistorySort,
     ) -> Result<Vec<HistoryEntry>> {
-        anyhow::ensure!(
-            (1..=MAX_HISTORY_PAGE_SIZE).contains(&limit),
-            "history page size must be between 1 and {MAX_HISTORY_PAGE_SIZE}"
-        );
+        self.history_page_filtered(offset, limit, sort, "", HistoryFilter::All)
+    }
+
+    /// Load one bounded, sorted page matching a literal substring and receipt state.
+    ///
+    /// Search matches filenames, public links, and local paths with `SQLite`'s ASCII case folding.
+    /// Whitespace around the query is ignored, and deletion URLs are never searched.
+    /// Local-only records include missing files so their history can still be found and removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when page bounds overflow or `SQLite` cannot read a row.
+    pub fn history_page_filtered(
+        &self,
+        offset: usize,
+        limit: usize,
+        sort: HistorySort,
+        query: &str,
+        filter: HistoryFilter,
+    ) -> Result<Vec<HistoryEntry>> {
         let offset = i64::try_from(offset).context("history offset is too large")?;
-        let limit = i64::try_from(limit).context("history page size is too large")?;
+        let page_limit = history_page_limit(limit)?;
+        let order = history_order(sort);
+        let sql = format!(
+            "SELECT {HISTORY_COLUMNS}
+             FROM upload_history {HISTORY_SELECTION} ORDER BY {order} LIMIT ?3 OFFSET ?4"
+        );
         let connection = self.connection.borrow();
-        let query = match (sort.column, sort.direction) {
-            (HistorySortColumn::Filename, SortDirection::Ascending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY original_name COLLATE NOCASE ASC, id ASC
-                 LIMIT ?1 OFFSET ?2"
-            }
 
-            (HistorySortColumn::Filename, SortDirection::Descending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY original_name COLLATE NOCASE DESC, id DESC
-                 LIMIT ?1 OFFSET ?2"
-            }
+        read_history_page(
+            &connection,
+            &sql,
+            params![query.trim(), filter.index(), page_limit, offset],
+            limit,
+        )
+    }
 
-            (HistorySortColumn::CreatedAt, SortDirection::Ascending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY created_at ASC, id ASC
-                 LIMIT ?1 OFFSET ?2"
-            }
-
-            (HistorySortColumn::CreatedAt, SortDirection::Descending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT ?1 OFFSET ?2"
-            }
-
-            (HistorySortColumn::Size, SortDirection::Ascending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY size_bytes ASC, id ASC
-                 LIMIT ?1 OFFSET ?2"
-            }
-
-            (HistorySortColumn::Size, SortDirection::Descending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY size_bytes DESC, id DESC
-                 LIMIT ?1 OFFSET ?2"
-            }
-
-            (HistorySortColumn::ExpiresAt, SortDirection::Ascending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY (expires_at = '') ASC, expires_at ASC, id ASC
-                 LIMIT ?1 OFFSET ?2"
-            }
-
-            (HistorySortColumn::ExpiresAt, SortDirection::Descending) => {
-                "SELECT id, created_at, original_name, size_bytes, link, delete_url, expires_at, local_path
-                 FROM upload_history
-                 ORDER BY (expires_at = '') ASC, expires_at DESC, id DESC
-                 LIMIT ?1 OFFSET ?2"
-            }
+    /// Continue a matching history page strictly after its last sorted record.
+    ///
+    /// The cursor retains the supplied record's sort value and ID even after clearing or deletion.
+    /// Search and filter semantics match [`Self::history_page_filtered`].
+    /// Records without an expiration remain last in either order.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the page limit or cursor cannot be represented or `SQLite` fails.
+    pub fn history_page_filtered_after(
+        &self,
+        limit: usize,
+        sort: HistorySort,
+        query: &str,
+        filter: HistoryFilter,
+        after: &HistoryEntry,
+    ) -> Result<Vec<HistoryEntry>> {
+        let page_limit = history_page_limit(limit)?;
+        let value = history_cursor_value(sort.column, after)?;
+        let (ties, following) = history_cursor_predicates(sort);
+        let order = match (sort.column, sort.direction) {
+            (HistorySortColumn::ExpiresAt, SortDirection::Ascending) => "expires_at ASC, id ASC",
+            (HistorySortColumn::ExpiresAt, SortDirection::Descending) => "expires_at DESC, id DESC",
+            _ => history_order(sort),
         };
-        let mut statement = connection
-            .prepare(query)
-            .context("failed to prepare history page query")?;
-        let rows = statement
-            .query_map(params![limit, offset], history_entry_from_row)
-            .context("failed to query upload history")?;
-        let mut entries = Vec::with_capacity(usize::try_from(limit).unwrap_or_default());
+        let sql = format!(
+            "SELECT {HISTORY_COLUMNS} FROM upload_history
+             {HISTORY_SELECTION} AND {ties} ORDER BY {order} LIMIT ?3"
+        );
+        let connection = self.connection.borrow();
+        let mut entries = read_history_page(
+            &connection,
+            &sql,
+            params![query.trim(), filter.index(), page_limit, value, after.id],
+            limit,
+        )?;
 
-        for row in rows {
-            entries.push(row.context("failed to decode upload history")?);
+        // Separate equal-key rows from later keys so SQLite seeks directly to the cursor ID.
+        // A tuple comparison can still walk every earlier tie, even with a composite index.
+        if entries.len() < limit
+            && (sort.column != HistorySortColumn::ExpiresAt || !after.expires_at.is_empty())
+        {
+            let remaining = limit - entries.len();
+            let sql = format!(
+                "SELECT {HISTORY_COLUMNS} FROM upload_history
+                 {HISTORY_SELECTION} AND {following} ORDER BY {order} LIMIT ?3"
+            );
+
+            entries.extend(read_history_page(
+                &connection,
+                &sql,
+                params![
+                    query.trim(),
+                    filter.index(),
+                    history_page_limit(remaining)?,
+                    value
+                ],
+                remaining,
+            )?);
+        }
+
+        // Keep expiry groups separate so both directions seek their index without sorting.
+        if sort.column == HistorySortColumn::ExpiresAt
+            && !after.expires_at.is_empty()
+            && entries.len() < limit
+        {
+            let remaining = limit - entries.len();
+            let sql = format!(
+                "SELECT {HISTORY_COLUMNS} FROM upload_history {HISTORY_SELECTION}
+                 AND (expires_at = '') = 1 ORDER BY {order} LIMIT ?3"
+            );
+
+            entries.extend(read_history_page(
+                &connection,
+                &sql,
+                params![query.trim(), filter.index(), history_page_limit(remaining)?],
+                remaining,
+            )?);
         }
 
         Ok(entries)
@@ -391,6 +476,28 @@ impl PlatformStorage {
             .connection
             .borrow()
             .query_row("SELECT COUNT(*) FROM upload_history", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .context("failed to count upload history")?;
+
+        u64::try_from(count).context("SQLite returned a negative history count")
+    }
+
+    /// Count records matching the same public-field search and filter as a page.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` cannot count the matching records.
+    pub fn history_count_filtered(&self, query: &str, filter: HistoryFilter) -> Result<u64> {
+        if query.trim().is_empty() && filter == HistoryFilter::All {
+            return self.history_count();
+        }
+
+        let sql = format!("SELECT COUNT(*) FROM upload_history {HISTORY_SELECTION}");
+        let count = self
+            .connection
+            .borrow()
+            .query_row(&sql, params![query.trim(), filter.index()], |row| {
                 row.get::<_, i64>(0)
             })
             .context("failed to count upload history")?;
@@ -441,10 +548,30 @@ impl PlatformStorage {
         &self,
         entries: &mut [HistoryEntry],
     ) -> Result<HistoryLocalPathReconciliation> {
+        self.reconcile_missing_history_local_paths_cancellable(entries, || false)
+    }
+
+    /// Reconcile missing paths while allowing cancellation between filesystem checks and writes.
+    ///
+    /// Cancellation before commit rolls back all pending changes and preserves the supplied paths.
+    /// After a successful commit, every cleared path is reflected in the supplied records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the stale local paths cannot be cleared atomically.
+    pub fn reconcile_missing_history_local_paths_cancellable(
+        &self,
+        entries: &mut [HistoryEntry],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<HistoryLocalPathReconciliation> {
         let mut report = HistoryLocalPathReconciliation::default();
         let mut missing = Vec::new();
 
         for entry in entries.iter().filter(|entry| !entry.local_path.is_empty()) {
+            if cancelled() {
+                return Ok(report);
+            }
+
             match classify_local_path(Path::new(&entry.local_path)) {
                 LocalPathState::RegularFile => {}
                 LocalPathState::Missing => missing.push((entry.id, entry.local_path.clone())),
@@ -453,7 +580,7 @@ impl PlatformStorage {
             }
         }
 
-        if missing.is_empty() {
+        if missing.is_empty() || cancelled() {
             return Ok(report);
         }
 
@@ -464,6 +591,10 @@ impl PlatformStorage {
         let mut reconciled = Vec::with_capacity(missing.len());
 
         for (id, path) in &missing {
+            if cancelled() {
+                return Ok(report);
+            }
+
             let changed = transaction
                 .execute(
                     "UPDATE upload_history SET local_path = ''
@@ -475,6 +606,10 @@ impl PlatformStorage {
             if changed != 0 {
                 reconciled.push((*id, path.as_str()));
             }
+        }
+
+        if cancelled() {
+            return Ok(report);
         }
 
         transaction
@@ -512,6 +647,118 @@ impl PlatformStorage {
         )?;
 
         Ok(())
+    }
+}
+
+fn history_page_limit(limit: usize) -> Result<i64> {
+    anyhow::ensure!(
+        (1..=MAX_HISTORY_PAGE_SIZE).contains(&limit),
+        "history page size must be between 1 and {MAX_HISTORY_PAGE_SIZE}"
+    );
+
+    i64::try_from(limit).context("history page size is too large")
+}
+
+fn read_history_page(
+    connection: &Connection,
+    sql: &str,
+    parameters: impl rusqlite::Params,
+    limit: usize,
+) -> Result<Vec<HistoryEntry>> {
+    let mut statement = connection
+        .prepare(sql)
+        .context("failed to prepare history page query")?;
+    let rows = statement
+        .query_map(parameters, history_entry_from_row)
+        .context("failed to query upload history")?;
+    let mut entries = Vec::with_capacity(limit);
+
+    for row in rows {
+        entries.push(row.context("failed to decode upload history")?);
+    }
+
+    Ok(entries)
+}
+
+fn history_cursor_value(column: HistorySortColumn, after: &HistoryEntry) -> Result<Value> {
+    Ok(match column {
+        HistorySortColumn::Filename => Value::Text(after.filename.clone()),
+
+        HistorySortColumn::CreatedAt => Value::Integer(after.created_at),
+
+        HistorySortColumn::Size => Value::Integer(
+            i64::try_from(after.size_bytes).context("history cursor size is too large")?,
+        ),
+
+        HistorySortColumn::ExpiresAt => Value::Text(after.expires_at.clone()),
+    })
+}
+
+fn history_cursor_predicates(sort: HistorySort) -> (&'static str, &'static str) {
+    match (sort.column, sort.direction) {
+        (HistorySortColumn::Filename, SortDirection::Ascending) => (
+            "original_name = ?4 COLLATE NOCASE AND id > ?5",
+            "original_name > ?4 COLLATE NOCASE",
+        ),
+
+        (HistorySortColumn::Filename, SortDirection::Descending) => (
+            "original_name = ?4 COLLATE NOCASE AND id < ?5",
+            "original_name < ?4 COLLATE NOCASE",
+        ),
+
+        (HistorySortColumn::CreatedAt, SortDirection::Ascending) => {
+            ("created_at = ?4 AND id > ?5", "created_at > ?4")
+        }
+
+        (HistorySortColumn::CreatedAt, SortDirection::Descending) => {
+            ("created_at = ?4 AND id < ?5", "created_at < ?4")
+        }
+
+        (HistorySortColumn::Size, SortDirection::Ascending) => {
+            ("size_bytes = ?4 AND id > ?5", "size_bytes > ?4")
+        }
+
+        (HistorySortColumn::Size, SortDirection::Descending) => {
+            ("size_bytes = ?4 AND id < ?5", "size_bytes < ?4")
+        }
+
+        (HistorySortColumn::ExpiresAt, SortDirection::Ascending) => (
+            "(expires_at = '') = (?4 = '') AND expires_at = ?4 AND id > ?5",
+            "(expires_at = '') = (?4 = '') AND expires_at > ?4",
+        ),
+
+        (HistorySortColumn::ExpiresAt, SortDirection::Descending) => (
+            "(expires_at = '') = (?4 = '') AND expires_at = ?4 AND id < ?5",
+            "(expires_at = '') = (?4 = '') AND expires_at < ?4",
+        ),
+    }
+}
+
+fn history_order(sort: HistorySort) -> &'static str {
+    match (sort.column, sort.direction) {
+        (HistorySortColumn::Filename, SortDirection::Ascending) => {
+            "original_name COLLATE NOCASE ASC, id ASC"
+        }
+
+        (HistorySortColumn::Filename, SortDirection::Descending) => {
+            "original_name COLLATE NOCASE DESC, id DESC"
+        }
+
+        (HistorySortColumn::CreatedAt, SortDirection::Ascending) => "created_at ASC, id ASC",
+
+        (HistorySortColumn::CreatedAt, SortDirection::Descending) => "created_at DESC, id DESC",
+
+        (HistorySortColumn::Size, SortDirection::Ascending) => "size_bytes ASC, id ASC",
+
+        (HistorySortColumn::Size, SortDirection::Descending) => "size_bytes DESC, id DESC",
+
+        (HistorySortColumn::ExpiresAt, SortDirection::Ascending) => {
+            "(expires_at = '') ASC, expires_at ASC, id ASC"
+        }
+
+        (HistorySortColumn::ExpiresAt, SortDirection::Descending) => {
+            "(expires_at = '') ASC, expires_at DESC, id DESC"
+        }
     }
 }
 
@@ -690,8 +937,8 @@ mod tests {
     use std::io::{Error, ErrorKind};
 
     use super::{
-        LocalPathState, capture_directory_needs_default, capture_directory_or_default,
-        classify_local_path_metadata, default_capture_directory,
+        LocalPathState, PlatformStorage, capture_directory_needs_default,
+        capture_directory_or_default, classify_local_path_metadata, default_capture_directory,
     };
 
     #[test]
@@ -746,5 +993,48 @@ mod tests {
             classify_local_path_metadata(Err(Error::new(ErrorKind::PermissionDenied, "injected"))),
             LocalPathState::Unavailable
         );
+    }
+
+    #[test]
+    fn cancelling_reconciliation_at_each_boundary_never_persists_a_partial_batch() {
+        use crate::history::HistoryEntry;
+
+        for cancel_at in 0..=6 {
+            let directory = tempfile::tempdir().unwrap();
+            let storage = PlatformStorage::open_in(directory.path()).unwrap();
+            let mut entries = Vec::new();
+
+            for name in ["first.png", "second.png"] {
+                let mut entry =
+                    HistoryEntry::local(name.to_owned(), 1, &directory.path().join(name));
+
+                entry.id = storage.insert_history(&entry).unwrap();
+                entries.push(entry);
+            }
+
+            let original = entries.clone();
+            let mut boundary = 0;
+            let report = storage
+                .reconcile_missing_history_local_paths_cancellable(&mut entries, || {
+                    let cancelled = boundary == cancel_at;
+
+                    boundary += 1;
+
+                    cancelled
+                })
+                .unwrap();
+
+            assert!(report.cleared == 0 || report.cleared == 2);
+
+            for (entry, original) in entries.iter().zip(&original) {
+                assert_eq!(storage.history_entry(entry.id).unwrap().unwrap(), *entry);
+
+                if report.cleared == 0 {
+                    assert_eq!(entry.local_path, original.local_path);
+                } else {
+                    assert!(entry.local_path.is_empty());
+                }
+            }
+        }
     }
 }

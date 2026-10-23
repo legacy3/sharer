@@ -4,7 +4,7 @@ use std::{cell::RefCell, fmt::Write as _, rc::Rc};
 
 use anyhow::Result;
 use sharer::{
-    config::{AppConfig, ShortcutConfig},
+    config::{AppConfig, SettingsMode, ShortcutConfig},
     storage::PlatformStorage,
 };
 use slint::ComponentHandle as _;
@@ -22,6 +22,7 @@ pub(super) fn wire_settings_callbacks(
     config: &Rc<RefCell<AppConfig>>,
     storage: &Rc<PlatformStorage>,
 ) {
+    wire_settings_mode_callback(window, config, storage);
     let save_window = window.as_weak();
     let save_hotkeys = Rc::clone(hotkeys);
     let save_status = Rc::clone(hotkey_status);
@@ -69,6 +70,44 @@ pub(super) fn wire_settings_callbacks(
             views::settings::initialize(&window, &discard_config.borrow());
             window.set_status_text("Changes discarded".into());
             window.set_status_detail("Settings match the saved configuration".into());
+        }
+    });
+}
+
+fn wire_settings_mode_callback(
+    window: &AppWindow,
+    config: &Rc<RefCell<AppConfig>>,
+    storage: &Rc<PlatformStorage>,
+) {
+    let mode_window = window.as_weak();
+    let mode_config = Rc::clone(config);
+    let mode_storage = Rc::clone(storage);
+
+    window.on_settings_mode_changed(move |advanced| {
+        let Some(window) = mode_window.upgrade() else {
+            return;
+        };
+        let mode = if advanced {
+            SettingsMode::Advanced
+        } else {
+            SettingsMode::Simple
+        };
+        let previous = mode_config.borrow().settings_mode;
+
+        if mode == previous {
+            return;
+        }
+
+        let result = mode_config
+            .borrow_mut()
+            .save_settings_mode(mode_storage.as_ref(), mode);
+
+        if let Err(error) = result {
+            window.set_advanced_settings(previous == SettingsMode::Advanced);
+            show_settings_error(
+                &window,
+                &format!("Could not remember settings view: {error}"),
+            );
         }
     });
 }

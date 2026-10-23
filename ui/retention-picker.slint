@@ -1,0 +1,22 @@
+import { CompactSelect } from "components.slint";
+import { Theme } from "theme.slint";
+
+export component LitterboxRetentionPicker inherits VerticalLayout {
+    in-out property <int> selected-retention: 3;
+    in property <bool> enabled: true;
+    spacing: 6px;
+
+    Text { text: "Litterbox retention"; color: Theme.text-soft; font-size: 13px; font-weight: 600; }
+    CompactSelect {
+        model: ["1 hour", "12 hours", "24 hours", "72 hours"];
+        current-index <=> root.selected-retention;
+        control-enabled: root.enabled;
+        label: "Litterbox retention";
+    }
+    Text {
+        text: "Temporary uploads only. Litterbox does not offer unlimited retention or an owner deletion link.";
+        color: Theme.text-muted;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+}

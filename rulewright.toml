@@ -33,6 +33,9 @@ enabled = true
 ignore = [
     "build.rs",
     "src/app/native_renderer.rs",
+    # Region selectors own observed native readiness deadlines and must mirror
+    # Slint's SLINT_SCALE_FACTOR environment override at the OS window boundary.
+    "src/app/region.rs",
     "src/autostart.rs",
     "src/recording/ffmpeg.rs",
     "src/recording/ffmpeg/install.rs",
@@ -316,7 +319,14 @@ ignore = []
 
 [rules.rust_global_state]
 enabled = true
-ignore = []
+ignore = [
+    # Keep one clipboard selection owner across UI and upload worker operations.
+    # Session guards own its lifetime; the registry only retains a weak reference.
+    "src/clipboard.rs",
+    # One synchronized permit bounds installer DNS across cancelled runtimes.
+    # Regression tests inject independent permits and exercise their release.
+    "src/recording/ffmpeg/install/resolver.rs",
+]
 
 [rules.rust_hardcoded_url]
 enabled = true

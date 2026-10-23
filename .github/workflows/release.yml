@@ -147,8 +147,9 @@ jobs:
           mkdir -p "package/${{ matrix.asset }}"
           cp "target/${{ matrix.target }}/release/ShareR" "package/${{ matrix.asset }}/ShareR"
           cp CONTRIBUTING.md LICENSE README.md assets/sharer.png assets/icons/FONT-AWESOME-LICENSE.txt "package/${{ matrix.asset }}/"
+          cp assets/fonts/OFL.txt "package/${{ matrix.asset }}/IBM-PLEX-SANS-OFL.txt"
           mkdir -p "package/${{ matrix.asset }}/docs/screenshots"
-          cp docs/custom-uploaders.md "package/${{ matrix.asset }}/docs/"
+          cp docs/custom-uploaders.md docs/upload-providers.md "package/${{ matrix.asset }}/docs/"
           cp docs/screenshots/*.png "package/${{ matrix.asset }}/docs/screenshots/"
           chmod +x "package/${{ matrix.asset }}/ShareR"
           tar -C package -czf "${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}"
@@ -163,6 +164,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
           cp "target/${{ matrix.target }}/release/ShareR" "$app/Contents/MacOS/ShareR"
           cp assets/macos/Info.plist "$app/Contents/Info.plist"
+          cp assets/fonts/OFL.txt "$app/Contents/Resources/IBM-PLEX-SANS-OFL.txt"
           version="${GITHUB_REF_NAME#v}"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" "$app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $version" "$app/Contents/Info.plist"
@@ -178,8 +180,9 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
           cp CONTRIBUTING.md LICENSE README.md assets/icons/FONT-AWESOME-LICENSE.txt "$root/"
+          cp assets/fonts/OFL.txt "$root/IBM-PLEX-SANS-OFL.txt"
           mkdir -p "$root/docs/screenshots"
-          cp docs/custom-uploaders.md "$root/docs/"
+          cp docs/custom-uploaders.md docs/upload-providers.md "$root/docs/"
           cp docs/screenshots/*.png "$root/docs/screenshots/"
           tar -C package -czf "${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}"
 
@@ -190,8 +193,9 @@ jobs:
           New-Item -ItemType Directory -Path "package/${{ matrix.asset }}" -Force
           Copy-Item "target/${{ matrix.target }}/release/ShareR.exe" "package/${{ matrix.asset }}/ShareR.exe"
           Copy-Item CONTRIBUTING.md, LICENSE, README.md, assets/sharer.png, assets/icons/FONT-AWESOME-LICENSE.txt "package/${{ matrix.asset }}/"
+          Copy-Item assets/fonts/OFL.txt "package/${{ matrix.asset }}/IBM-PLEX-SANS-OFL.txt"
           New-Item -ItemType Directory -Path "package/${{ matrix.asset }}/docs/screenshots" -Force
-          Copy-Item docs/custom-uploaders.md "package/${{ matrix.asset }}/docs/"
+          Copy-Item docs/custom-uploaders.md, docs/upload-providers.md "package/${{ matrix.asset }}/docs/"
           Copy-Item docs/screenshots/*.png "package/${{ matrix.asset }}/docs/screenshots/"
           Compress-Archive -Path "package/${{ matrix.asset }}" -DestinationPath "${{ matrix.asset }}.zip"
 

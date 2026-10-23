@@ -5,7 +5,7 @@ use serde::Deserialize;
 use super::{CredentialRequirement, Provider, ResponseMetadata};
 use crate::upload::{UploadReceipt, UploadTarget, parse_uploader_url};
 
-const UPLOAD_URL: &str = "https://api.imgur.com/3/upload";
+const UPLOAD_URL: &str = "https://api.imgur.com/3/image";
 const DELETE_URL: &str = "https://imgur.com/delete/";
 
 #[derive(Debug)]
@@ -69,6 +69,16 @@ struct ImgurData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_uses_the_documented_image_route() {
+        assert_eq!(
+            Imgur::endpoint(&UploadTarget::default(), 0)
+                .unwrap()
+                .as_str(),
+            "https://api.imgur.com/3/image"
+        );
+    }
 
     #[test]
     fn parses_public_and_deletion_links() {

@@ -27,10 +27,12 @@ use crate::validate_lifetime;
 
 mod metadata;
 mod providers;
+mod retention;
 
 use metadata::{sniff, sniff_reader, strip_in_place, strip_to_file};
 
 pub use providers::UploaderKind;
+pub use retention::LitterboxRetention;
 
 const MAX_RESPONSE_BYTES: usize = 64 * 1024;
 const UPLOAD_CHUNK_BYTES: usize = 64 * 1024;
@@ -118,6 +120,7 @@ fn error_chain<'a>(
 #[derive(Clone, Default, Eq, PartialEq)]
 pub struct UploadTarget {
     pub kind: UploaderKind,
+    pub litterbox_retention: LitterboxRetention,
     pub custom_url: String,
     pub credential: String,
     pub header_name: String,
@@ -198,6 +201,7 @@ impl fmt::Debug for UploadTarget {
         formatter
             .debug_struct("UploadTarget")
             .field("kind", &self.kind)
+            .field("litterbox_retention", &self.litterbox_retention)
             .field("custom_url_configured", &!self.custom_url.is_empty())
             .field("credential_configured", &!self.credential.is_empty())
             .field("header_name", &self.header_name)

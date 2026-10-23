@@ -169,8 +169,11 @@ jobs:
           mkdir -p artifact
           cp "${{ matrix.executable }}" artifact/ShareR
           cp LICENSE assets/icons/FONT-AWESOME-LICENSE.txt artifact/
+          cp assets/fonts/OFL.txt artifact/IBM-PLEX-SANS-OFL.txt
+          mkdir -p artifact/docs
+          cp docs/custom-uploaders.md docs/upload-providers.md artifact/docs/
           chmod +x artifact/ShareR
-          tar -C artifact -czf "sharer-ci-${{ matrix.asset }}.tar.gz" ShareR LICENSE FONT-AWESOME-LICENSE.txt
+          tar -C artifact -czf "sharer-ci-${{ matrix.asset }}.tar.gz" ShareR LICENSE FONT-AWESOME-LICENSE.txt IBM-PLEX-SANS-OFL.txt docs
 
       - name: Package macOS test application
         if: runner.os == 'macOS'
@@ -181,6 +184,7 @@ jobs:
           mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$iconset"
           cp "${{ matrix.executable }}" "$app/Contents/MacOS/ShareR"
           cp assets/macos/Info.plist "$app/Contents/Info.plist"
+          cp assets/fonts/OFL.txt "$app/Contents/Resources/IBM-PLEX-SANS-OFL.txt"
           for size in 16 32 128 256 512; do
             sips -z "$size" "$size" assets/sharer.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
             doubled=$((size * 2))
@@ -193,7 +197,10 @@ jobs:
           codesign --force --deep --sign - "$app"
           codesign --verify --deep --strict "$app"
           cp LICENSE assets/icons/FONT-AWESOME-LICENSE.txt artifact/
-          tar -C artifact -czf "sharer-ci-${{ matrix.asset }}.tar.gz" ShareR.app LICENSE FONT-AWESOME-LICENSE.txt
+          cp assets/fonts/OFL.txt artifact/IBM-PLEX-SANS-OFL.txt
+          mkdir -p artifact/docs
+          cp docs/custom-uploaders.md docs/upload-providers.md artifact/docs/
+          tar -C artifact -czf "sharer-ci-${{ matrix.asset }}.tar.gz" ShareR.app LICENSE FONT-AWESOME-LICENSE.txt IBM-PLEX-SANS-OFL.txt docs
 
       - name: Package Windows test build
         if: runner.os == 'Windows'
@@ -202,6 +209,9 @@ jobs:
           New-Item -ItemType Directory -Path artifact -Force
           Copy-Item "${{ matrix.executable }}" artifact/ShareR.exe
           Copy-Item LICENSE, assets/icons/FONT-AWESOME-LICENSE.txt artifact/
+          Copy-Item assets/fonts/OFL.txt artifact/IBM-PLEX-SANS-OFL.txt
+          New-Item -ItemType Directory -Path artifact/docs -Force
+          Copy-Item docs/custom-uploaders.md, docs/upload-providers.md artifact/docs/
           Compress-Archive -Path artifact/* -DestinationPath "sharer-ci-${{ matrix.asset }}.zip"
 
       - name: Upload testable binary

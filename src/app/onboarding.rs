@@ -163,7 +163,7 @@ fn wire_onboarding_reset_callbacks(window: &AppWindow, config: &Rc<RefCell<AppCo
             return;
         };
 
-        if !can_open_setup(&window) || !confirm_settings_reset() {
+        if !can_open_setup(&window) {
             return;
         }
 
@@ -175,7 +175,7 @@ fn wire_onboarding_reset_callbacks(window: &AppWindow, config: &Rc<RefCell<AppCo
 }
 
 fn can_open_setup(window: &AppWindow) -> bool {
-    if window.get_busy() {
+    if window.get_busy() || window.get_confirmation_visible() {
         return false;
     }
 
@@ -190,18 +190,4 @@ fn can_open_setup(window: &AppWindow) -> bool {
 
     finish_shortcut_recording(window);
     true
-}
-
-fn confirm_settings_reset() -> bool {
-    rfd::MessageDialog::new()
-        .set_level(rfd::MessageLevel::Warning)
-        .set_title("Reset settings?")
-        .set_description(
-            "Review the default preferences in setup. Nothing changes until you choose \
-             Reset and finish. Your provider credentials, capture folder, history and local \
-             captures are kept. Cancel keeps all saved settings.",
-        )
-        .set_buttons(rfd::MessageButtons::YesNo)
-        .show()
-        == rfd::MessageDialogResult::Yes
 }

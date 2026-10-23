@@ -1,6 +1,7 @@
 import { Icons, Theme } from "../theme.slint";
 import { AppScrollView, Badge, CompactField, CompactSelect, FlatButton, InlineNotice, NumberStepper, PageHeading, PageSubtitle, SectionHeading, SelectableButton, SettingGroup, SettingRow, SettingsCard, ToggleRow } from "../components.slint";
 import { ProviderPicker } from "../provider-picker.slint";
+import { LitterboxRetentionPicker } from "../retention-picker.slint";
 
 component SettingsPane inherits AppScrollView {
     VerticalLayout {
@@ -8,6 +9,39 @@ component SettingsPane inherits AppScrollView {
         spacing: 14px;
         alignment: start;
         @children
+    }
+}
+
+component AdvancedSummary inherits VerticalLayout {
+    in property <string> text;
+    in property <string> detail;
+    in property <bool> enabled: true;
+    callback edit();
+
+    padding: 16px;
+    spacing: 8px;
+
+    Text {
+        text: root.text;
+        color: Theme.text-soft;
+        font-size: 13px;
+        font-weight: 500;
+        wrap: word-wrap;
+    }
+    if root.detail != "": Text {
+        text: root.detail;
+        color: Theme.text-muted;
+        font-size: 12px;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        FlatButton {
+            text: "Edit in Advanced";
+            min-width: 136px;
+            enabled: root.enabled;
+            clicked => { root.edit(); }
+        }
+        Rectangle { horizontal-stretch: 1; background: transparent; }
     }
 }
 
@@ -19,8 +53,8 @@ component TabButton inherits Rectangle {
 
     height: 40px;
     background: transparent;
-    border-width: tab-focus.has-focus ? 1px : 0px;
-    border-color: Theme.primary-bright;
+    border-width: tab-focus.has-focus ? 2px : 0px;
+    border-color: Theme.focus;
     border-radius: Theme.control-radius;
     forward-focus: tab-focus;
     accessible-role: tab;
@@ -73,6 +107,7 @@ component TabButton inherits Rectangle {
 }
 
 component ShortcutField inherits Rectangle {
+    in property <string> action-label;
     in property <string> shortcut;
     in property <bool> recording: false;
     in property <bool> enabled: true;
@@ -82,13 +117,13 @@ component ShortcutField inherits Rectangle {
     height: Theme.control-height;
     vertical-stretch: 0;
     border-radius: Theme.control-radius;
-    border-width: 1px;
-    border-color: root.recording || shortcut-focus.has-focus ? Theme.primary-bright : Theme.border;
+    border-width: shortcut-focus.has-focus ? 2px : 1px;
+    border-color: shortcut-focus.has-focus ? Theme.focus : (root.recording ? Theme.primary : Theme.border-bright);
     background: root.hovered ? Theme.surface-hover : Theme.surface-raised;
     opacity: root.enabled ? 1 : 0.55;
     forward-focus: shortcut-focus;
     accessible-role: button;
-    accessible-label: root.recording ? "Press the new shortcut" : (root.shortcut == "" ? "Shortcut disabled" : "Shortcut " + root.shortcut);
+    accessible-label: root.action-label + ": " + (root.recording ? "Press the new shortcut" : (root.shortcut == "" ? "Shortcut disabled" : "Shortcut " + root.shortcut));
     accessible-description: "Click to record a new shortcut. Backspace or Delete disables it; Escape cancels.";
     accessible-enabled: root.enabled;
     accessible-action-default => { if root.enabled { root.record(); } }
@@ -108,9 +143,10 @@ component ShortcutField inherits Rectangle {
         width: root.width;
         height: root.height;
         focus-on-click: false;
-        enabled: root.enabled;
+        focus-on-tab-navigation: root.enabled;
 
         key-pressed(event) => {
+            if !root.enabled { return reject; }
             if event.text == Key.Space || event.text == Key.Return {
                 root.record();
                 return accept;
@@ -148,6 +184,7 @@ component ShortcutCell inherits VerticalLayout {
         font-weight: 500;
     }
     ShortcutField {
+        action-label: root.label;
         shortcut: root.shortcut;
         recording: root.recording;
         enabled: root.enabled;
@@ -155,9 +192,49 @@ component ShortcutCell inherits VerticalLayout {
     }
 }
 
+component RecordingNumberRow inherits HorizontalLayout {
+    in property <string> label;
+    in property <string> input-label;
+    in property <string> unit;
+    in-out property <int> value;
+    in property <int> minimum;
+    in property <int> maximum;
+    in property <bool> enabled: true;
+
+    height: Theme.control-height;
+    spacing: 8px;
+    cross-axis-alignment: center;
+
+    Text {
+        width: 120px;
+        text: root.label;
+        color: Theme.text-soft;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+    NumberStepper {
+        width: 120px;
+        label: root.input-label;
+        value <=> root.value;
+        minimum: root.minimum;
+        maximum: root.maximum;
+        step-size: 1;
+        enabled: root.enabled;
+    }
+    Text {
+        width: 32px;
+        text: root.unit;
+        color: Theme.text-muted;
+        font-size: 12px;
+        vertical-alignment: center;
+    }
+    Rectangle { horizontal-stretch: 1; background: transparent; }
+}
+
 export component SettingsView inherits Rectangle {
     background: transparent;
 
+    in-out property <bool> advanced-settings: false;
     in-out property <int> uploader-kind;
     in-out property <string> uploader-url;
     in-out property <string> imgur-credential;
@@ -168,6 +245,7 @@ export component SettingsView inherits Rectangle {
     in-out property <string> upload-header-name;
     in-out property <string> upload-header-value;
     in-out property <int> lifetime-seconds: 86400;
+    in-out property <int> litterbox-retention: 3;
     in-out property <bool> save-captures: true;
     in-out property <bool> auto-upload-captures: true;
     in-out property <bool> force-sdr-captures: false;
@@ -191,6 +269,7 @@ export component SettingsView inherits Rectangle {
     in-out property <int> capture-name-mode: 0;
     in-out property <string> capture-custom-name;
     in-out property <bool> require-tor: false;
+    in property <bool> force-require-proxy: false;
     in-out property <int> tray-click-action: 0;
     in property <bool> configured: false;
     in property <string> uploader-name: "Custom";
@@ -216,8 +295,23 @@ export component SettingsView inherits Rectangle {
     callback reset-settings();
     callback custom-endpoint-edited();
     callback custom-header-edited();
+    callback settings-mode-changed(bool);
 
     property <bool> narrow: root.width < 620px;
+    // Keep the proxy control in place after disabling an existing requirement.
+    property <bool> proxy-controls-open: false;
+
+    init => { root.proxy-controls-open = root.require-tor; }
+
+    function show-advanced() {
+        root.advanced-settings = true;
+        root.settings-mode-changed(true);
+        advanced-mode.focus();
+    }
+
+    changed require-tor => {
+        if root.require-tor { root.proxy-controls-open = true; }
+    }
 
     changed selected-section => {
         if root.selected-section != 1 && root.shortcut-recording != 0 {
@@ -261,6 +355,34 @@ export component SettingsView inherits Rectangle {
                     primary: true;
                     enabled: root.settings-dirty && root.shortcut-recording == 0 && !root.busy;
                     clicked => { root.save-settings(); }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 6px;
+                cross-axis-alignment: center;
+
+                SelectableButton {
+                    text: "Simple";
+                    min-width: 86px;
+                    selected: !root.advanced-settings;
+                    enabled: !root.busy;
+                    clicked => { root.advanced-settings = false; root.settings-mode-changed(false); }
+                }
+                advanced-mode := SelectableButton {
+                    text: "Advanced";
+                    min-width: 100px;
+                    selected: root.advanced-settings;
+                    enabled: !root.busy;
+                    clicked => { root.advanced-settings = true; root.settings-mode-changed(true); }
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.settings-dirty && root.narrow ? "Unsaved changes · Save to apply" : (root.advanced-settings ? "All controls, including recording limits." : "Everyday controls. Advanced values stay active.");
+                    color: root.settings-dirty && root.narrow ? Theme.accent : Theme.text-muted;
+                    font-size: 12px;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
                 }
             }
 
@@ -334,7 +456,13 @@ export component SettingsView inherits Rectangle {
 
                         SectionHeading { text: "Tray"; }
                         SettingsCard {
-                            SettingRow {
+                            if !root.advanced-settings: AdvancedSummary {
+                                text: "Left click: " + ["Capture region", "Show ShareR", "Capture screen", "Record region", "Upload clipboard", "Do nothing"][root.tray-click-action];
+                                detail: "Double click opens ShareR. Right click opens the tray menu.";
+                                enabled: !root.busy;
+                                edit => { root.show-advanced(); }
+                            }
+                            if root.advanced-settings: SettingRow {
                                 label: "Left click";
                                 description: "Runs after the double-click delay.";
                                 help: "Double click opens ShareR. Right click opens the tray menu.";
@@ -449,7 +577,13 @@ export component SettingsView inherits Rectangle {
                                 checked <=> root.force-sdr-captures;
                             }
                             if root.retina-scaling-available: Rectangle { height: 1px; background: Theme.border; }
-                            if root.retina-scaling-available: SettingRow {
+                            if root.retina-scaling-available && !root.advanced-settings: AdvancedSummary {
+                                text: root.capture-resolution == 0 ? "Retina: native pixels" : "Retina: logical size · " + ["Fast", "Balanced", "Sharp"][root.resize-quality];
+                                detail: "Native keeps every display pixel. Logical size makes smaller files.";
+                                enabled: !root.busy;
+                                edit => { root.show-advanced(); }
+                            }
+                            if root.retina-scaling-available && root.advanced-settings: SettingRow {
                                 label: "Retina size";
                                 description: "Native keeps every Mac pixel; Logical matches points.";
                                 CompactSelect {
@@ -459,8 +593,8 @@ export component SettingsView inherits Rectangle {
                                     current-index <=> root.capture-resolution;
                                 }
                             }
-                            if root.retina-scaling-available && root.capture-resolution == 1: Rectangle { height: 1px; background: Theme.border; }
-                            if root.retina-scaling-available && root.capture-resolution == 1: SettingRow {
+                            if root.retina-scaling-available && root.capture-resolution == 1 && root.advanced-settings: Rectangle { height: 1px; background: Theme.border; }
+                            if root.retina-scaling-available && root.capture-resolution == 1 && root.advanced-settings: SettingRow {
                                 label: "Resize quality";
                                 description: "Sharp keeps text crisp; Fast is quickest.";
                                 CompactSelect {
@@ -478,80 +612,81 @@ export component SettingsView inherits Rectangle {
 
                         SectionHeading { text: "Recording"; }
                         SettingsCard {
-                            SettingGroup {
-                                label: "Limits";
-                                description: "Stops at this length or the file size limit.";
+                            ToggleRow {
+                                enabled: !root.busy;
+                                title: "Record as MP4 using FFmpeg";
+                                description: root.recording-mp4 ? "MP4 video · no audio · FFmpeg required" : "Animated WebP · no audio · no extra installation";
+                                help: "Create smaller H.264 video files without audio. ShareR finds FFmpeg automatically and offers to download it if missing. Leave off to record animated WebP.";
+                                checked <=> root.recording-mp4;
+                            }
+                            Rectangle { height: 1px; background: Theme.border; }
+                            if !root.advanced-settings: SettingGroup {
+                                label: "Frame rate";
+                                description: "Changes smoothness and file size. Time and size limits stay unchanged.";
                                 HorizontalLayout {
-                                    spacing: 24px;
-
-                                    VerticalLayout {
-                                        min-width: 0px;
-                                        preferred-width: 0px;
-                                        horizontal-stretch: 1;
-                                        spacing: 5px;
-                                        Text { text: "Length"; color: Theme.text-muted; font-size: 12px; }
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            NumberStepper {
-                                                enabled: !root.busy;
-                                                width: 120px;
-                                                label: "Maximum recording length in seconds";
-                                                value <=> root.recording-max-seconds;
-                                                minimum: 1;
-                                                maximum: 3600;
-                                                step-size: 1;
-                                            }
-                                            Text { text: "sec"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
-                                        }
-                                    }
-                                    VerticalLayout {
-                                        min-width: 0px;
-                                        preferred-width: 0px;
-                                        horizontal-stretch: 1;
-                                        spacing: 5px;
-                                        Text { text: "Frame rate"; color: Theme.text-muted; font-size: 12px; }
-                                        HorizontalLayout {
-                                            spacing: 8px;
-                                            NumberStepper {
-                                                enabled: !root.busy;
-                                                width: 120px;
-                                                label: "Recording frame rate";
-                                                value <=> root.recording-fps;
-                                                minimum: 1;
-                                                maximum: 60;
-                                                step-size: 1;
-                                            }
-                                            Text { text: "fps"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
-                                        }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: 8px;
-                                    Text { width: 120px; text: "Max file size"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
-                                    NumberStepper {
+                                    spacing: 6px;
+                                    SelectableButton {
+                                        text: "15 fps";
+                                        selected: root.recording-fps == 15;
                                         enabled: !root.busy;
-                                        width: 120px;
-                                        label: "Maximum recording file size in GiB";
-                                        value <=> root.recording-max-gib;
-                                        minimum: 1;
-                                        maximum: 3;
-                                        step-size: 1;
+                                        clicked => { root.recording-fps = 15; }
                                     }
-                                    Text { text: "GiB"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
+                                    SelectableButton {
+                                        text: "30 fps";
+                                        selected: root.recording-fps == 30;
+                                        enabled: !root.busy;
+                                        clicked => { root.recording-fps = 30; }
+                                    }
+                                    SelectableButton {
+                                        text: "60 fps";
+                                        selected: root.recording-fps == 60;
+                                        enabled: !root.busy;
+                                        clicked => { root.recording-fps = 60; }
+                                    }
                                     Rectangle { horizontal-stretch: 1; background: transparent; }
                                 }
+                            }
+                            if !root.advanced-settings: AdvancedSummary {
+                                text: root.recording-fps + " fps · " + (Math.mod(root.recording-max-seconds, 60) == 0 ? root.recording-max-seconds / 60 + " min" : root.recording-max-seconds + " sec") + " · " + root.recording-max-gib + " GiB limit";
+                                detail: root.settings-dirty ? "Recording settings shown are a draft. Save changes to apply them." : "Recording stops at the time or file size limit. These values stay active in Simple mode.";
+                                enabled: !root.busy;
+                                edit => { root.show-advanced(); }
+                            }
+                            if root.advanced-settings: SettingGroup {
+                                label: "Recording settings";
+                                description: "Recording stops at the duration or file size limit.";
+                                RecordingNumberRow {
+                                    label: "Max duration";
+                                    input-label: "Maximum recording duration in seconds";
+                                    unit: "sec";
+                                    value <=> root.recording-max-seconds;
+                                    minimum: 1;
+                                    maximum: 3600;
+                                    enabled: !root.busy;
+                                }
+                                RecordingNumberRow {
+                                    label: "Frame rate";
+                                    input-label: "Recording frame rate in frames per second";
+                                    unit: "fps";
+                                    value <=> root.recording-fps;
+                                    minimum: 1;
+                                    maximum: 60;
+                                    enabled: !root.busy;
+                                }
+                                RecordingNumberRow {
+                                    label: "Max file size";
+                                    input-label: "Maximum recording file size in GiB";
+                                    unit: "GiB";
+                                    value <=> root.recording-max-gib;
+                                    minimum: 1;
+                                    maximum: 3;
+                                    enabled: !root.busy;
+                                }
                                 Text {
-                                    text: "Recordings stream to disk. The 1–3 GiB limit bounds the file, not memory; animated WebP cannot exceed 4 GiB.";
+                                    text: "Duration: 1–3,600 sec. Frame rate: 1–60 fps. File size: 1–3 GiB.";
                                     color: Theme.text-muted;
                                     font-size: 11.5px;
                                     wrap: word-wrap;
-                                }
-                                ToggleRow {
-                                    enabled: !root.busy;
-                                    title: "Record as MP4 using FFmpeg";
-                                    description: root.recording-mp4 ? "MP4 · compressed video · automatic FFmpeg setup" : "WebP · animated image · no extra installation";
-                                    help: "Create smaller H.264 video files without audio. ShareR finds FFmpeg automatically and offers to download it if missing. Leave off to record animated WebP.";
-                                    checked <=> root.recording-mp4;
                                 }
                             }
                         }
@@ -662,10 +797,63 @@ export component SettingsView inherits Rectangle {
 
                         SectionHeading { text: "Destination"; }
                         Text {
-                            text: "Choose where uploads go. Automatic uploads are controlled in Capture.";
+                            text: "Manual uploads use this provider. Selecting one does not turn on automatic uploads.";
                             color: Theme.text-muted;
                             font-size: 12.5px;
                             wrap: word-wrap;
+                        }
+                        SettingsCard {
+                            VerticalLayout {
+                                padding-left: 16px;
+                                padding-right: 16px;
+                                padding-top: 12px;
+                                padding-bottom: 12px;
+                                spacing: 10px;
+
+                                HorizontalLayout {
+                                    spacing: 16px;
+                                    cross-axis-alignment: center;
+
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        min-width: 0px;
+                                        spacing: 4px;
+
+                                        Text {
+                                            text: root.auto-upload-captures ? "Automatic uploads are on" : "Automatic uploads are off";
+                                            color: Theme.text;
+                                            font-size: 13.5px;
+                                            font-weight: 600;
+                                            height: self.preferred-height;
+                                            wrap: word-wrap;
+                                        }
+                                        Text {
+                                            text: root.auto-upload-captures ? (root.configured ? "New captures are shared with this provider. Links are public." : "Set up this provider before saving automatic uploads.") : "New captures are not uploaded automatically. Manual uploads remain available.";
+                                            color: Theme.text-muted;
+                                            font-size: 12.5px;
+                                            height: self.preferred-height;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    if !root.narrow: FlatButton {
+                                        text: "Change";
+                                        width: 90px;
+                                        horizontal-stretch: 0;
+                                        enabled: !root.busy;
+                                        clicked => { root.selected-section = 1; }
+                                    }
+                                }
+                                if root.narrow: HorizontalLayout {
+                                    FlatButton {
+                                        text: "Change";
+                                        width: 90px;
+                                        horizontal-stretch: 0;
+                                        enabled: !root.busy;
+                                        clicked => { root.selected-section = 1; }
+                                    }
+                                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                                }
+                            }
                         }
                         ProviderPicker {
                             compact: root.narrow;
@@ -674,6 +862,12 @@ export component SettingsView inherits Rectangle {
                             enabled: !root.busy;
                             show-local: false;
                             chosen(index) => { root.uploader-kind = index; }
+                        }
+                        if root.uploader-kind == 3: SettingsCard {
+                            LitterboxRetentionPicker {
+                                selected-retention <=> root.litterbox-retention;
+                                enabled: !root.busy;
+                            }
                         }
                         if root.uploader-kind == 0 || (root.uploader-kind >= 4 && root.uploader-kind <= 6): HorizontalLayout {
                             spacing: 10px;
@@ -732,7 +926,13 @@ export component SettingsView inherits Rectangle {
                                 }
                             }
                             if root.uploader-kind == 0: Rectangle { height: 1px; background: Theme.border; }
-                            if root.uploader-kind == 0: SettingGroup {
+                            if root.uploader-kind == 0 && !root.advanced-settings: AdvancedSummary {
+                                text: root.upload-header-name == "" && root.upload-header-value == "" ? "No authentication header" : (root.upload-header-name == "" || root.upload-header-value == "" ? "Authentication header is incomplete" : "Authentication: " + root.upload-header-name + " header configured");
+                                detail: "Optional credentials for your custom server.";
+                                enabled: !root.busy;
+                                edit => { root.show-advanced(); }
+                            }
+                            if root.uploader-kind == 0 && root.advanced-settings: SettingGroup {
                                 label: "Authentication header";
                                 description: "Optional. One extra header per upload.";
                                 HorizontalLayout {
@@ -783,7 +983,7 @@ export component SettingsView inherits Rectangle {
                                     SelectableButton { text: "1 week"; enabled: !root.busy; selected: root.lifetime-seconds == 604800; clicked => { root.lifetime-seconds = 604800; } }
                                     Rectangle { horizontal-stretch: 1; background: transparent; }
                                 }
-                                HorizontalLayout {
+                                if root.advanced-settings: HorizontalLayout {
                                     spacing: 8px;
                                     NumberStepper {
                                         enabled: !root.busy;
@@ -797,10 +997,16 @@ export component SettingsView inherits Rectangle {
                                     Text { text: root.lifetime-seconds == 0 ? "No expiry requested" : "seconds"; color: Theme.text-muted; font-size: 12px; vertical-alignment: center; }
                                     Rectangle { horizontal-stretch: 1; background: transparent; }
                                 }
+                                if !root.advanced-settings: Text {
+                                    text: root.lifetime-seconds == 0 ? "No expiry requested. The server may still set a limit." : "Requested expiry: " + (root.lifetime-seconds == 3600 ? "1 hour" : root.lifetime-seconds == 86400 ? "1 day" : root.lifetime-seconds == 604800 ? "1 week" : Math.mod(root.lifetime-seconds, 3600) == 0 ? root.lifetime-seconds / 3600 + " hours" : root.lifetime-seconds + " seconds") + ". Advanced allows an exact value.";
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
                             }
                         }
                         Text {
-                            text: "Public services set their own retention limits. The optional expiry request applies only to a custom server.";
+                            text: "Public services set their own limits. Litterbox offers fixed durations; custom servers accept an optional expiry request.";
                             color: Theme.text-muted;
                             font-size: 12px;
                             wrap: word-wrap;
@@ -835,7 +1041,8 @@ export component SettingsView inherits Rectangle {
                             if root.capture-name-mode == 3: Rectangle { height: 1px; background: Theme.border; }
                             if root.capture-name-mode == 3: SettingRow {
                                 label: "Custom base name";
-                                description: "Characters are sanitized; the extension is added.";
+                                description: "Extension added automatically.";
+                                help: "The base name is cleaned up to make a valid file name.";
                                 CompactField {
                                     field-enabled: !root.busy;
                                     text <=> root.capture-custom-name;
@@ -851,10 +1058,32 @@ export component SettingsView inherits Rectangle {
 
                         SectionHeading { text: "Network"; }
                         SettingsCard {
-                            ToggleRow {
+                            if root.force-require-proxy: ToggleRow {
+                                enabled: false;
+                                checked: true;
+                                title: "Local proxy required for this session";
+                                description: "Required by the --require-tor launch option. No direct fallback.";
+                            }
+                            if root.force-require-proxy: SettingGroup {
+                                label: "Saved proxy preference";
+                                description: root.require-tor ? "Your saved preference also requires a local proxy." : "Your saved preference leaves the local proxy optional.";
+                                Text {
+                                    text: "The launch option takes priority for this session. Restart without --require-tor to edit the saved preference. A SOCKS5 connection does not verify Tor routing or anonymity.";
+                                    color: Theme.text-muted;
+                                    font-size: 12px;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if !root.force-require-proxy && !root.advanced-settings && !root.proxy-controls-open: AdvancedSummary {
+                                text: "Local proxy optional";
+                                detail: "Prefers a local SOCKS5 proxy. Otherwise system proxy settings apply, or a direct connection. Advanced can require a local proxy.";
+                                enabled: !root.busy;
+                                edit => { root.show-advanced(); }
+                            }
+                            if !root.force-require-proxy && (root.advanced-settings || root.proxy-controls-open): ToggleRow {
                                 enabled: !root.busy;
                                 title: "Only upload through a local proxy";
-                                description: "SOCKS5 on 127.0.0.1:9050 or :9150. No direct fallback.";
+                                description: root.require-tor ? "SOCKS5 on 127.0.0.1:9050 or :9150. No direct fallback." : "Local SOCKS5 first, then system proxy settings or a direct connection.";
                                 help: "ShareR checks that a SOCKS5 proxy answers, but does not verify Tor routing or anonymity. Use a proxy you trust.";
                                 checked <=> root.require-tor;
                             }

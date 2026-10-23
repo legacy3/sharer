@@ -36,14 +36,14 @@ The macOS desktop build targets macOS 14 and is compiled separately for Apple si
 
 Some checks use small standalone tools:
 
-| Tool                                   | Used for                        |
-| -------------------------------------- | ------------------------------- |
-| Prettier                               | Markdown formatting             |
-| Rulewright                             | Repository-specific Rust rules  |
-| shfmt                                  | Screenshot generator formatting |
-| ShellCheck                             | Screenshot generator linting    |
-| actionlint                             | GitHub Actions workflow linting |
-| ImageMagick, SQLite, Xvfb, and xdotool | Screenshot generation           |
+| Tool                                                      | Used for                        |
+| --------------------------------------------------------- | ------------------------------- |
+| Prettier                                                  | Markdown formatting             |
+| Rulewright                                                | Repository-specific Rust rules  |
+| shfmt                                                     | Screenshot generator formatting |
+| ShellCheck                                                | Screenshot generator linting    |
+| actionlint                                                | GitHub Actions workflow linting |
+| ImageMagick, Python 3, SQLite, Xvfb, Openbox, and xdotool | Screenshot generation           |
 
 ## Day-to-day commands
 
@@ -57,9 +57,10 @@ cargo bench --bench memory                   # check allocation boundaries
 rulewright --strict                          # repository rules
 ```
 
-For memory-constrained machines and WSL, use the existing CI profile and one compiler job when running the desktop suite:
+For memory-constrained machines and WSL, use the existing CI profile and one compiler job for desktop builds and tests:
 
 ```bash
+cargo build --profile ci --jobs 1 --config profile.ci.package.sharer.opt-level=0 --features desktop --bin ShareR
 cargo test --profile ci --jobs 1 --config profile.ci.package.sharer.opt-level=0 --features desktop --lib --bins --tests
 ```
 
@@ -77,6 +78,7 @@ Run `cargo fmt` before committing. The full gate used for a final check is liste
 | `src/upload/`       | Streaming payloads, metadata removal, and uploader providers            |
 | `src/storage.rs`    | SQLite settings and paginated upload history                            |
 | `ui/`               | Slint views, shared components, theme, and models                       |
+| `assets/fonts/`     | Bundled IBM Plex Sans fonts, source checksums, and license              |
 | `tests/fixtures/`   | Licensed reference images used by transformation tests                  |
 | `docs/screenshots/` | README screenshots and their generator                                  |
 
@@ -87,6 +89,12 @@ Run `cargo fmt` before committing. The full gate used for a final check is liste
 **Do not hide copies.** Ordinary files stream from disk. Generated captures move into the upload body. A change that silently duplicates a large image or recording is a regression even if it looks fast in a small test.
 
 **Do not invent another control style.** Shared controls and typography belong in `ui/components.slint`. Colors and shared measurements belong in `ui/theme.slint`. Render UI changes in a desktop session because compiling Slint is not a visual test.
+
+**Keep view preferences separate from settings drafts.** Simple and Advanced disclose controls for the same configuration. Switching views persists only that preference immediately; it must preserve the draft, exact hidden values, and active privacy requirements. Save and Discard still control operational settings.
+
+**Keep first-run upload consent explicit.** Fresh desktop setup starts with Local only selected, local copies on, and automatic uploads off. Selecting a provider must not enable automatic uploads. Preserve completed configurations and begin setup replay with their saved choices; the first-run staging rule must not silently rewrite existing settings or redefine explicit Reset behavior.
+
+**Redistribute bundled font licenses.** The desktop app embeds unmodified IBM Plex Sans. Its provenance and checksums live in `assets/fonts/README.md` in the source tree. Keep `IBM-PLEX-SANS-OFL.txt` in Linux, Windows, and macOS packages, including test artifacts, and inside the macOS app's Resources directory so the notice stays with a moved app bundle.
 
 **Treat deletion URLs as secrets.** They are capabilities, not ordinary public links. Do not put real endpoints, credentials, deletion URLs, or user paths in tests, screenshots, logs, or documentation.
 
@@ -120,15 +128,23 @@ Closing to the tray drops the Slint component and rendered history model when no
 
 Animated recording encodes one bounded frame at a time into a temporary file. RGBA input is limited to 32 MiB per frame. Encoded output is configurable from 1 to 3 GiB, below WebP's 32-bit container-size limit; this does not promise a fixed process RSS ceiling.
 
+The latest-result preview uses one background decoder worker and bounded request/result queues. It accepts regular PNG and JPEG files up to 32 MiB, limits either image dimension to 8192 pixels, limits total pixels to 16,777,216, and rejects decoded image data above 64 MiB. The retained RGBA thumbnail is at most 640 × 360. The decoder receives a 128 MiB allocation budget; this is a best-effort decoder limit, not a guarantee about process RSS or every codec allocation. Stale results must never replace a newer artifact, and oversized or unsupported files must retain their ordinary file actions.
+
 ## UI screenshots
 
-The README gallery is generated from the real desktop application against an isolated temporary database:
+Generate the README gallery from an existing full desktop binary built under the desired resource limits:
 
 ```bash
-./docs/screenshots/generate.sh
+./docs/screenshots/generate.sh /absolute/path/to/ShareR
 ```
 
-The generator needs Xvfb, xdotool, SQLite, and ImageMagick. It renders every primary view at 2x scale, strips image metadata, and never reads the user's ShareR configuration. Regenerate the full set whenever a visible UI change lands.
+The generator needs Python 3, Xvfb, Openbox, xdotool, SQLite, and ImageMagick, including `display` and `convert`. It freezes and hashes one full application binary, renders the primary views at 920 × 620 logical pixels and 2x scale, and strips image metadata. A private X server and temporary database contain only synthetic files and links. The result preview comes from an actual local-only region capture; no upload action is invoked. Simple settings and a separate Advanced recording view demonstrate both disclosure levels. Runs preserve available diagnostic frames and application/window-manager logs beside the output, including when an interaction fails.
+
+Without a binary argument, the script permits an automatic build only inside a cgroup v2 memory limit of at most 6 GiB. That build runs offline with the CI profile, one Cargo job, and ShareR optimization level 0. A supplied binary never triggers Cargo. Run the generator in a bounded, network-isolated validation environment; its proxy environment variables are only a fallback, not network isolation. Set `SHARER_SCREENSHOT_OUTPUT_DIR` to write the staged gallery to a scratch directory when the source checkout is read-only.
+
+Regenerate the full set whenever a visible UI change lands, then inspect every image independently. A completed generator run establishes that files were produced, not that the design or interactions passed review.
+
+Judge composition as well as containment: related fields need consistent label placement, aligned controls, and deliberate spacing. Readable controls can still form an incoherent layout. Frame a featured section with its heading and complete card whenever it fits; use overlapping views when scrolling is necessary. A composition failure blocks visual acceptance even when builds and interaction checks pass.
 
 ## Image fixtures
 
@@ -163,14 +179,20 @@ rulewright --strict
 shfmt -d docs/screenshots/generate.sh
 shellcheck docs/screenshots/generate.sh
 actionlint
-prettier --check "**/*.md"
+git ls-files -z -- '*.md' | xargs -0 prettier --no-config --no-editorconfig --ignore-path /dev/null --parser markdown --check
 ```
+
+The Markdown check uses an existing Prettier 3.8.3 installation, only tracked Markdown files, and no repository configuration or EditorConfig. It does not install packages or load plugins.
 
 Keep LF line endings in Rust and shell files, as specified by `.gitattributes`. CRLF can produce false unused-dependency warnings in Rulewright and break shell scripts.
 
 For UI changes, regenerate the screenshots and inspect every affected view at the default and minimum supported window sizes.
 
 Use separate acceptance gates for layout, interaction, and state handling. Layout review must inspect actual renders at 100%, 150%, and 200%, including intermediate scroll positions: labels must fit, related controls must align, and scrollbars must have clear space beside content. Interaction review must exercise mouse and keyboard focus, popup selection, cancellation, and reopening. State review must verify saved settings and files after success, failure, and cancellation. Ask a reviewer who did not implement the view to judge the screenshots; a successful build or screenshot command does not pass the visual gate. Record the tested binary, fixtures, and any platform-specific gaps before publishing the gallery.
+
+For the capture workspace, also inspect PNG and JPEG previews, unsupported formats, missing or oversized files, and a newer result arriving while an older preview is loading. Copy/open feedback must preserve the capture or upload outcome. A failed new attempt must clearly distinguish its error from the retained previous artifact, and cancellation must not look like failure. Check effective forced-proxy messaging and the no-output/unconfigured-uploader readiness states. Stop recording and Cancel upload must remain reachable at the minimum window size. Exercise Simple/Advanced switching with unsaved edits and exact custom values, then Save, Discard, close, and reopen. History review must combine search, filters, sort order, pagination, and deletion; use fake deletion links to verify that their secret values cannot produce search matches. Include a large history with missing paths to measure event-loop responsiveness while the background worker reconciles it.
+
+Record design, interaction, feature/state, and security verdicts separately, with unresolved issues and the evidence each reviewer actually inspected. Linux/Xvfb screenshots establish Linux layout evidence only. They do not establish native Windows or macOS behavior, screen-reader compatibility, working system capture permissions, or a passed security review. Keep those gaps explicit until their corresponding checks run.
 
 Windows CI runs the complete headless and desktop test suites, including redirected CLI output, per-user startup registration in a disposable non-startup registry subtree, and single-instance coordination. For native UI checks, use an isolated `SHARER_CONFIG_DIR` and a local test uploader; do not change the user's login registration or upload their captures.
 

@@ -94,15 +94,61 @@ where
         cancellation,
         restore_window_after_capture: _,
     } = job;
+    let retained = match &source {
+        JobSource::History(entry) => Some((entry.clone(), true)),
+        JobSource::ExistingLocal(entry) => Some((entry.clone(), false)),
+        _ => None,
+    };
+    let prepared = match prepare_upload_source(source, remove_exif, capture_complete) {
+        Ok(prepared) => prepared,
+
+        Err(failure) => {
+            let Some((mut entry, persisted)) = retained.filter(|(entry, _)| {
+                entry.link.is_empty() && std::path::Path::new(&entry.local_path).is_file()
+            }) else {
+                return Err(failure);
+            };
+            let history_warning = if persisted {
+                None
+            } else {
+                persist_history(&mut entry, None)
+            };
+
+            return Ok(retained_artifact_failure(entry, failure, history_warning));
+        }
+    };
+
+    process_prepared_upload(
+        prepared,
+        upload,
+        cancellation.as_ref(),
+        upload_progress,
+        persist_history,
+    )
+}
+
+fn process_prepared_upload<P>(
+    prepared: PreparedSource,
+    upload: Option<UploadOptions>,
+    cancellation: &UploadCancellation,
+    upload_progress: &Arc<UploadProgress>,
+    persist_history: P,
+) -> std::result::Result<ProcessedUpload, JobFailure>
+where
+    P: FnOnce(&mut HistoryEntry, Option<&HistoryEntry>) -> Option<String>,
+{
     let PreparedSource {
         mut payload,
         save_directory,
         warning: recording_warning,
         history_entry,
-    } = prepare_upload_source(source, remove_exif, capture_complete)?;
+        retained_local_path,
+    } = prepared;
 
     let (local_copy, save_warning) = if let Some(original) = history_entry.as_ref() {
         (Some(PathBuf::from(&original.local_path)), None)
+    } else if retained_local_path.is_some() {
+        (retained_local_path, None)
     } else {
         save_capture_copy(&mut payload, save_directory.as_deref())
     };
@@ -115,8 +161,7 @@ where
     let mut upload_failure = None;
     let mut clipboard_copied = false;
     let (mut entry, clipboard_warning) = if let Some(upload) = upload {
-        let upload_result =
-            upload_payload(payload, &upload, cancellation.as_ref(), upload_progress);
+        let upload_result = upload_payload(payload, &upload, cancellation, upload_progress);
 
         match upload_result {
             Ok(receipt) => {
@@ -183,6 +228,22 @@ where
     })
 }
 
+fn retained_artifact_failure(
+    entry: HistoryEntry,
+    failure: JobFailure,
+    history_warning: Option<String>,
+) -> ProcessedUpload {
+    ProcessedUpload {
+        local_copy: Some(PathBuf::from(&entry.local_path)),
+        entry,
+        history_warning,
+        clipboard_warning: None,
+        clipboard_copied: false,
+        capture_warning: None,
+        upload_failure: Some(failure),
+    }
+}
+
 fn upload_payload(
     payload: UploadPayload,
     upload: &UploadOptions,
@@ -217,7 +278,10 @@ fn copy_uploaded_link(link: &str, requested: bool) -> (bool, Option<String>) {
 
 const fn job_source_stage(source: &JobSource) -> FailureStage {
     match source {
-        JobSource::File(_) | JobSource::History(_) | JobSource::Clipboard => FailureStage::Upload,
+        JobSource::File(_)
+        | JobSource::ExistingLocal(_)
+        | JobSource::History(_)
+        | JobSource::Clipboard => FailureStage::Upload,
         JobSource::Prepared { .. }
         | JobSource::RegionCapture { .. }
         | JobSource::Recording { .. } => FailureStage::Capture,
@@ -248,6 +312,7 @@ struct PreparedSource {
     save_directory: Option<PathBuf>,
     warning: Option<String>,
     history_entry: Option<HistoryEntry>,
+    retained_local_path: Option<PathBuf>,
 }
 
 impl PreparedSource {
@@ -257,6 +322,7 @@ impl PreparedSource {
             save_directory,
             warning: None,
             history_entry: None,
+            retained_local_path: None,
         }
     }
 }
@@ -270,7 +336,10 @@ fn prepare_upload_source(
     let should_remove_exif = remove_exif
         && matches!(
             &source,
-            JobSource::File(_) | JobSource::History(_) | JobSource::Clipboard
+            JobSource::File(_)
+                | JobSource::ExistingLocal(_)
+                | JobSource::History(_)
+                | JobSource::Clipboard
         );
     let prepared = prepare_job_source(source);
 
@@ -291,6 +360,19 @@ fn prepare_job_source(source: JobSource) -> Result<PreparedSource> {
     match source {
         JobSource::File(path) => Ok(PreparedSource::new(UploadPayload::from_path(&path)?, None)),
 
+        JobSource::ExistingLocal(entry) => {
+            anyhow::ensure!(
+                entry.link.is_empty() && !entry.local_path.is_empty(),
+                "only local-only artifacts can be uploaded"
+            );
+            let path = PathBuf::from(entry.local_path);
+            let mut prepared = PreparedSource::new(UploadPayload::from_path(&path)?, None);
+
+            prepared.retained_local_path = Some(path);
+
+            Ok(prepared)
+        }
+
         JobSource::History(entry) => {
             anyhow::ensure!(
                 entry.link.is_empty() && !entry.local_path.is_empty(),
@@ -303,6 +385,7 @@ fn prepare_job_source(source: JobSource) -> Result<PreparedSource> {
                 save_directory: None,
                 warning: None,
                 history_entry: Some(entry),
+                retained_local_path: None,
             })
         }
 
@@ -359,6 +442,7 @@ fn prepare_job_source(source: JobSource) -> Result<PreparedSource> {
                 save_directory,
                 warning: recorded.warning,
                 history_entry: None,
+                retained_local_path: None,
             })
         }
     }

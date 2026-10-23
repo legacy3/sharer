@@ -64,6 +64,7 @@ fn main() -> ExitCode {
     });
 
     prepare_windows_console(cli.is_headless());
+    let _clipboard_session = clipboard::ClipboardSession::new();
     let mut output = std::io::stdout().lock();
     let result = if cli.is_headless() {
         run_headless(&cli, &mut output)
@@ -355,6 +356,7 @@ fn apply_cli_upload_overrides(target: &mut UploadTarget, cli: &Cli) -> Result<()
 
 fn apply_upload_target(config: &mut AppConfig, target: UploadTarget) {
     config.uploader_kind = target.kind;
+    config.litterbox_retention = target.litterbox_retention;
     config.uploader_url = target.custom_url;
     config
         .uploader_credentials
